@@ -28,12 +28,55 @@ pub struct Scene {
     pub animation: Option<Animation>,
     #[serde(default)]
     pub programs: Option<Programs>,
+    #[serde(default)]
+    pub simulations: Vec<Simulation>,
     /// The JSON this scene was parsed from; animation tracks are applied to it per frame.
     #[serde(skip)]
     raw: Value,
     /// Frame this scene was evaluated at (0 for a static scene).
     #[serde(skip)]
     pub frame: f64,
+}
+
+/// A population of GPU agents stepped by scene programs and drawn as instances of one mesh.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Simulation {
+    pub name: String,
+    /// Number of agents (1 .. 16M).
+    pub count: u32,
+    /// `void f(uint id, inout Agent a, inout uint rng)`, run once.
+    pub init: String,
+    /// `void f(uint id, inout Agent a, inout uint rng)`, run every substep (`SIM.dt`).
+    pub step: String,
+    /// Neighbour grid cell size (≈ interaction radius). 0 = no neighbour queries.
+    #[serde(default)]
+    pub cell_size: f32,
+    #[serde(default = "one_u32")]
+    pub substeps: u32,
+    /// Seconds simulated before time 0, so the system has settled when the shot starts.
+    #[serde(default)]
+    pub warmup: f32,
+    /// Mesh drawn for every agent (+Z = forward, +Y = up), or `asset` (first mesh of a glTF).
+    #[serde(default)]
+    pub geometry: Option<Geometry>,
+    #[serde(default)]
+    pub asset: Option<String>,
+    #[serde(default)]
+    pub materials: Vec<Material>,
+    /// Mesh scale (multiplied by each agent's `size`).
+    #[serde(default = "one")]
+    pub scale: f32,
+    /// Turn each instance to face along its velocity.
+    #[serde(default = "yes")]
+    pub orient: bool,
+}
+
+fn one_u32() -> u32 {
+    1
+}
+fn yes() -> bool {
+    true
 }
 
 /// Scene-supplied Slang code hooked into the renderer. See `pxl help programs`.
@@ -86,7 +129,7 @@ impl Programs {
         out
     }
 
-    fn validate(&self, nodes: &[Node]) -> Result<()> {
+    fn validate(&self, nodes: &[Node], sims_use_programs: bool) -> Result<()> {
         for (name, v) in &self.params {
             if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || name.starts_with(|c: char| c.is_ascii_digit()) {
                 bail!("programs.params: '{name}' must be a valid identifier (letters, digits, _)");
@@ -101,6 +144,7 @@ impl Programs {
             }
         }
         let uses_materials = nodes.iter().any(|n| matches!(n, Node::Mesh(m) if m.materials.iter().any(|m| m.program.is_some())));
+        let uses_materials = uses_materials || sims_use_programs;
         let hooks = self.camera.is_some() || self.propagate.is_some() || self.film.is_some() || uses_materials;
         if hooks && self.source.is_none() && self.code.is_none() {
             bail!("programs: hooks are named but there is no `source` file or inline `code`");
@@ -206,6 +250,8 @@ pub enum Geometry {
         #[serde(default = "seg64")]
         segments: u32,
     },
+    /// Low-poly bird (wingspan 1, +Z forward, +Y up), cheap enough to instance millions.
+    Bird {},
 }
 
 /// OpenPBR-style input names (the same vocabulary MaterialX uses).
@@ -460,8 +506,31 @@ impl Scene {
                 }
             }
         }
+        for (i, sim) in self.simulations.iter().enumerate() {
+            let ctx = |m: String| anyhow::anyhow!("simulations[{i}] '{}': {m}", sim.name);
+            if !(1..=16_000_000).contains(&sim.count) {
+                return Err(ctx(format!("count must be 1..16000000, got {}", sim.count)));
+            }
+            for (field, f) in [("init", &sim.init), ("step", &sim.step)] {
+                if !is_ident(f) {
+                    return Err(ctx(format!("{field}: '{f}' must be the name of a Slang function")));
+                }
+            }
+            if sim.geometry.is_some() == sim.asset.is_some() {
+                return Err(ctx("give exactly one of `geometry` or `asset` for the agent mesh".into()));
+            }
+            if !(sim.cell_size >= 0.0) || sim.substeps == 0 || sim.substeps > 64 || !(sim.warmup >= 0.0) {
+                return Err(ctx("cell_size >= 0, substeps 1..64, warmup >= 0".into()));
+            }
+            if self.programs.is_none() {
+                return Err(ctx("simulations need a `programs` block with the init/step functions".into()));
+            }
+            if self.simulations[..i].iter().any(|o| o.name == sim.name) {
+                return Err(ctx("duplicate simulation name".into()));
+            }
+        }
         if let Some(p) = &self.programs {
-            p.validate(&self.nodes)?;
+            p.validate(&self.nodes, !self.simulations.is_empty())?;
         }
         if let Some(m) = self.render.motion_blur {
             if !(0.0..=1.0).contains(&m) {
@@ -582,6 +651,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{e:#}").contains("nope"), "{e:#}");
+    }
+
+    #[test]
+    fn simulations_validate() {
+        let ok = r#"{"version":1,"programs":{"code":"//"},"nodes":[{"type":"camera"}],
+            "simulations":[{"name":"f","count":10,"init":"i","step":"s","geometry":{"std":"bird"}}]}"#;
+        let s = Scene::from_json(ok).unwrap();
+        assert_eq!(s.simulations[0].substeps, 1);
+        assert!(geometry::build(s.simulations[0].geometry.as_ref().unwrap()).triangle_count() > 8);
+        let no_mesh = ok.replace(r#","geometry":{"std":"bird"}"#, "");
+        assert!(format!("{:#}", Scene::from_json(&no_mesh).unwrap_err()).contains("geometry"));
+        let no_programs = ok.replace(r#""programs":{"code":"//"},"#, "");
+        assert!(format!("{:#}", Scene::from_json(&no_programs).unwrap_err()).contains("programs"));
+        let too_many = ok.replace(r#""count":10"#, r#""count":20000000"#);
+        assert!(Scene::from_json(&too_many).is_err());
     }
 
     #[test]

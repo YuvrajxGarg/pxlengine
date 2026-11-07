@@ -5,7 +5,7 @@ mod accel;
 mod compute;
 pub mod slang;
 
-pub use accel::{Accel, BlasInput, TlasInstance};
+pub use accel::{instance_bytes, Accel, BlasInput, TlasInstance};
 pub use ash::vk;
 pub use compute::{Binding, ComputePipeline, Resource};
 pub use gpu_allocator::MemoryLocation;
@@ -232,6 +232,29 @@ impl Context {
         Ok(slice[..b.size as usize].to_vec())
     }
 
+    /// Copy `data` into a (device-local) buffer at `offset` through a staging buffer.
+    pub fn upload(&mut self, dst: &Buffer, offset: u64, data: &[u8]) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let staging = self.create_buffer_init(data, vk::BufferUsageFlags::TRANSFER_SRC, "staging")?;
+        let r = self.submit(|cmd| unsafe {
+            self.device.cmd_copy_buffer(
+                cmd,
+                staging.handle,
+                dst.handle,
+                &[vk::BufferCopy { src_offset: 0, dst_offset: offset, size: data.len() as u64 }],
+            )
+        });
+        self.destroy_buffer(staging);
+        r
+    }
+
+    /// Full barrier between any two GPU operations (compute, transfer, AS build).
+    pub fn barrier_all(&self, cmd: vk::CommandBuffer) {
+        self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::ALL_COMMANDS);
+    }
+
     pub fn destroy_buffer(&mut self, b: Buffer) {
         if let Some((handle, alloc)) = self.buffers[b.id].take() {
             unsafe { self.device.destroy_buffer(handle, None) };
@@ -252,6 +275,8 @@ impl Context {
                 cmd,
                 &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
+            // Make all earlier device writes visible to this submission.
+            self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::ALL_COMMANDS);
             record(cmd);
             self.device.end_command_buffer(cmd)?;
             let fence = self.device.create_fence(&vk::FenceCreateInfo::default(), None)?;

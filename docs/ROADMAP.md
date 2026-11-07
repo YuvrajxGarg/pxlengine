@@ -55,8 +55,15 @@ There is no editor.
       Known gaps: with a propagation program, emissive/HDRI light sampling is off (BSDF-only,
       noisier) and shadow rays stay straight; emission added by material programs isn't
       importance-sampled; programs can't add their own GPU buffers yet (phase 5).
-- [ ] **5. Simulation programs** – Slang compute stages owned by the scene: particles / agents
-      (million-bird flock), GPU instancing into the TLAS, per-frame refit.
+- [x] **5. Simulation programs** (done 2026-11-07) – scene `simulations`: agents (64 B each)
+      initialised and stepped by scene Slang functions with fixed substeps and warm-up;
+      per-step GPU neighbour grid (hashed cells, counting sort: count -> 3-pass prefix scan ->
+      scatter) behind a `neighbors()` iterator; a GPU emit kernel writes every agent as a TLAS
+      instance + renderer instance record (velocity-oriented, per-agent tint); TLAS built from
+      GPU memory each subframe; motion blur extrapolates along velocity. Measured on the RTX 4080
+      Laptop: 1M boids ≈ 31 ms per step, instance+TLAS build ≈ 21 ms, 1280x720 16 spp trace ≈ 22 ms.
+      Known gaps: no wing flapping / per-agent animation; one mesh per simulation; agents can't
+      read the scene geometry (no collisions with meshes yet); state lives only within a render.
 - [ ] **6. VFX + libraries** – plate footage, tracked cameras, proxy geometry & shadow catchers,
       occlusion mattes; fluids library (APIC/FLIP + surface reconstruction).
 - [ ] **7. Agent ergonomics** – token-budgeted help (~2.5k tokens first page), `help field`

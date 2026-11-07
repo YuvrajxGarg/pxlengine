@@ -3,6 +3,7 @@
 pub mod film;
 mod library;
 mod program;
+mod sim;
 
 pub use program::ProgramSet;
 
@@ -76,9 +77,10 @@ pub struct FrameStats {
     pub render_ms: f64,
     pub denoise_ms: f64,
     pub subframes: usize,
+    pub sim_ms: f64,
 }
 
-fn bytes<T: Copy>(v: &[T]) -> &[u8] {
+pub(crate) fn bytes<T: Copy>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
@@ -88,6 +90,8 @@ pub struct Renderer {
     denoiser: Option<std::result::Result<pxl_denoise::Denoiser, String>>,
     programs: ProgramSet,
     film_pipe: Option<ComputePipeline>,
+    sim_kernels: Option<sim::SimKernels>,
+    sims: Vec<sim::SimState>,
 }
 
 /// Static (whole-render) GPU data.
@@ -122,7 +126,12 @@ impl Renderer {
         } else {
             None
         };
-        Ok(Renderer { ctx, pipe, denoiser: None, programs, film_pipe })
+        let sim_kernels = if programs.simulations.is_empty() {
+            None
+        } else {
+            Some(sim::SimKernels::new(&mut ctx, &programs.source)?)
+        };
+        Ok(Renderer { ctx, pipe, denoiser: None, programs, film_pipe, sim_kernels, sims: Vec::new() })
     }
 
     /// Name of the denoiser device, or why it's unavailable.
@@ -149,6 +158,15 @@ impl Renderer {
         mut sink: impl FnMut(usize, Image, &FrameStats) -> Result<()>,
     ) -> Result<Vec<String>> {
         let mut lib = Library::new(base_dir, self.programs.material_ids.clone());
+        // Simulations come from the first frame's scene (their params animate per frame).
+        if let Some(first) = frames.first().and_then(|f| f.first()) {
+            self.sims.clear();
+            for (i, sim) in first.simulations.iter().enumerate() {
+                let object = (first.nodes.len() + i) as u32;
+                let st = sim::SimState::new(&mut self.ctx, &mut lib, sim, i as u32, object, first.render.fps as f64, opts.seed)?;
+                self.sims.push(st);
+            }
+        }
         let mut prepared: Vec<Vec<(Scene, Vec<Inst>)>> = Vec::with_capacity(frames.len());
         for subframes in frames {
             let mut list = Vec::with_capacity(subframes.len());
@@ -162,7 +180,15 @@ impl Renderer {
         let shared = self.upload_shared(&mut lib)?;
         let mut warnings = std::mem::take(&mut lib.warnings);
         for (i, subframes) in prepared.iter().enumerate() {
-            let (img, stats) = self.render_frame(&lib, &shared, subframes, opts, &mut warnings)?;
+            let center = (subframes[0].0.frame + subframes[subframes.len() - 1].0.frame) * 0.5;
+            let params = self.programs.param_data(&subframes[subframes.len() / 2].0);
+            let t = Instant::now();
+            for si in 0..self.sims.len() {
+                self.sim_advance(si, center, &params).with_context(|| format!("simulation '{}'", self.sims[si].name))?;
+            }
+            let sim_ms = t.elapsed().as_secs_f64() * 1e3;
+            let (img, mut stats) = self.render_frame(&lib, &shared, subframes, center, opts, &mut warnings)?;
+            stats.sim_ms = sim_ms;
             sink(i, img, &stats)?;
         }
         Ok(warnings)
@@ -252,6 +278,7 @@ impl Renderer {
         lib: &Library,
         sh: &Shared,
         subframes: &[(Scene, Vec<Inst>)],
+        center: f64,
         opts: &RenderOptions,
         warnings: &mut Vec<String>,
     ) -> Result<(Image, FrameStats)> {
@@ -270,7 +297,8 @@ impl Renderer {
         for (i, (scene, insts)) in subframes.iter().enumerate() {
             // Spread samples evenly over the shutter; every subframe gets at least one.
             let n = (opts.samples / k + u32::from((i as u32) < opts.samples % k)).max(1);
-            self.render_subframe(lib, sh, scene, insts, opts, (accum, aux), next..next + n, &mut stats)?;
+            let time_offset = ((scene.frame - center) / scene.render.fps as f64) as f32;
+            self.render_subframe(lib, sh, scene, insts, opts, (accum, aux), next..next + n, time_offset, &mut stats)?;
             next += n;
         }
 
@@ -372,6 +400,7 @@ impl Renderer {
         opts: &RenderOptions,
         (accum, aux): (Buffer, Buffer),
         samples: std::ops::Range<u32>,
+        time_offset: f32,
         stats: &mut FrameStats,
     ) -> Result<()> {
         let t0 = Instant::now();
@@ -534,20 +563,44 @@ impl Renderer {
         let time = (scene.frame / scene.render.fps as f64) as f32;
         frame.extend_from_slice(bytes(&[aperture, focus, time, scene.frame as f32]));
 
-        // ---- upload per-frame data
+        // ---- upload per-frame data; simulation agents are appended on the GPU
+        let static_count = inst_rec.len() as u32;
+        let sim_mat_base = mats.len() as u32;
+        let mut sim_total = 0u32;
+        for st in &self.sims {
+            mats.push(st.material);
+            sim_total += st.count;
+            stats.instances += st.count as usize;
+            stats.triangles += st.count as usize * st.tris_per_agent;
+        }
+        let total = static_count + sim_total;
+        let xfer = vk::BufferUsageFlags::TRANSFER_DST;
+        let inst_buf = self.ctx.create_buffer((total as u64 + 1) * 64, storage | xfer, MemoryLocation::GpuOnly, "instances")?;
+        self.ctx.upload(&inst_buf, 0, bytes(&inst_rec))?;
+        let desc_buf = self.ctx.create_buffer(
+            (total.max(1) as u64) * 64,
+            storage | xfer | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+            MemoryLocation::GpuOnly,
+            "tlas instances",
+        )?;
+        self.ctx.upload(&desc_buf, 0, &pxl_gpu::instance_bytes(&tlas_inst))?;
+        let mut base = static_count;
+        for si in 0..self.sims.len() {
+            self.sim_emit(si, desc_buf, inst_buf, base, sim_mat_base + si as u32, lib, time_offset)?;
+            base += self.sims[si].count;
+        }
         let ctx = &mut self.ctx;
-        inst_rec.push([0; 16]);
+        let tlas = ctx.build_tlas_from(desc_buf.address, total)?;
+        ctx.destroy_buffer(desc_buf);
         mats.push([0.0; 24]);
         lights.push([0.0; 16]);
         emissive.push([0.0; 4]);
-        let inst_buf = ctx.create_buffer_init(bytes(&inst_rec), storage, "instances")?;
         let mat_buf = ctx.create_buffer_init(bytes(&mats), storage, "materials")?;
         let light_buf = ctx.create_buffer_init(bytes(&lights), storage, "lights")?;
         let em_buf = ctx.create_buffer_init(bytes(&emissive), storage, "emissive")?;
         let cdf_buf = ctx.create_buffer_init(bytes(&cdf), storage, "emissive cdf")?;
         let frame_buf = ctx.create_buffer_init(&frame, storage, "frame")?;
         let par_buf = ctx.create_buffer_init(bytes(&self.programs.param_data(scene)), storage, "params")?;
-        let tlas = ctx.build_tlas(&tlas_inst)?;
         let pixels = w as u64 * h as u64;
         let resources = [
             Resource::Accel(tlas.handle),

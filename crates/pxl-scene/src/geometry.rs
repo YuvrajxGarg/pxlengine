@@ -57,7 +57,43 @@ pub fn build(g: &Geometry) -> MeshData {
         Geometry::Box { size } => cuboid(size),
         Geometry::Cylinder { radius, height, segments } => cylinder(radius, height, segments.clamp(3, 1024)),
         Geometry::Torus { radius, tube, segments } => torus(radius, tube, segments.clamp(3, 1024)),
+        Geometry::Bird {} => bird(),
     }
+}
+
+/// Low-poly bird: diamond body, swept wings, tail fan. Unshared vertices -> flat shading.
+fn bird() -> MeshData {
+    let nose = [0.0, 0.0, 0.42];
+    let tail = [0.0, 0.0, -0.3];
+    let top = [0.0, 0.055, 0.04];
+    let bottom = [0.0, -0.045, 0.06];
+    let l = [-0.055, 0.0, 0.04];
+    let r = [0.055, 0.0, 0.04];
+    let mut tris: Vec<[[f32; 3]; 3]> = vec![
+        [nose, l, top], [nose, top, r], [nose, r, bottom], [nose, bottom, l],
+        [tail, top, l], [tail, r, top], [tail, bottom, r], [tail, l, bottom],
+    ];
+    for s in [-1.0f32, 1.0] {
+        // wing: root at the shoulder, swept tip, slight dihedral
+        let root_f = [0.05 * s, 0.01, 0.14];
+        let root_b = [0.05 * s, 0.01, -0.08];
+        let mid = [0.3 * s, 0.05, 0.02];
+        let tip = [0.5 * s, 0.07, -0.16];
+        tris.push([root_f, mid, root_b]);
+        tris.push([mid, tip, root_b]);
+        // tail feathers
+        tris.push([[0.0, 0.0, -0.22], [0.11 * s, 0.0, -0.42], [0.0, 0.0, -0.4]]);
+    }
+    let mut m = MeshData::default();
+    for t in tris {
+        let base = m.positions.len() as u32;
+        for p in t {
+            m.push(p, [0.0, 1.0, 0.0], [p[0] + 0.5, p[2] + 0.5]);
+        }
+        m.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    m.compute_normals();
+    m
 }
 
 fn sphere(r: f32, seg: u32) -> MeshData {

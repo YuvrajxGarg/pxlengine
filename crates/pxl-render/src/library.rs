@@ -246,6 +246,24 @@ impl Library {
         Ok(parts)
     }
 
+    /// Mesh + material drawn for every agent of a simulation.
+    pub fn sim_mesh(&mut self, sim: &pxl_scene::Simulation) -> Result<(usize, GpuMaterial)> {
+        if let Some(g) = &sim.geometry {
+            let key = format!("{g:?}");
+            let mesh = match self.mesh_keys.get(&key) {
+                Some(&i) => i,
+                None => self.add_mesh(key, geometry::build(g), true),
+            };
+            let first = sim.materials.first().cloned().unwrap_or_default();
+            let material = self.material_from_inputs(&first.inputs, first.program.as_deref())?;
+            return Ok((mesh, material));
+        }
+        let file = sim.asset.as_deref().expect("validated: geometry or asset");
+        let parts = self.asset(file)?;
+        let (mesh, material, _) = parts.first().copied().context("asset has no meshes")?;
+        Ok((mesh, material))
+    }
+
     /// Resolve every renderable node of `scene` into instances, loading what is new.
     pub fn instances(&mut self, scene: &Scene) -> Result<Vec<Inst>> {
         let mut out = Vec::new();

@@ -49,5 +49,5 @@ tracing alone (noisier: use more samples); lights keep straight shadow rays.
 ## Helpers
 
 `PI`, `rnd(rng)` uniform 0..1, `lum(rgb)`, `env_radiance(dir)`, `trace_segment`,
-`no_hit()`, `time()`, `frame_number()`, `film_color(p)`, `P.<param>`.
+`no_hit()`, `time()`, `frame_number()`, `camera_position()`, `film_color(p)`, `P.<param>`.
 Examples: examples/black-hole.json, examples/programs.json, examples/fisheye.json.

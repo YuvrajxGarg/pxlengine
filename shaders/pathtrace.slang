@@ -193,10 +193,12 @@ Surface make_surface(Hit h, float3 d) {
     if (dot(s.ng, d) > 0) s.ng = -s.ng;
     if (dot(s.n, s.ng) < 0) s.n = -s.n;
 
+    uint tint = asuint(inst.n1.w);                   // per-instance colour (simulation agents)
     float4 bc = sample_tex(m.tex0.x, uv);
     s.base = m.base_rough.rgb * (m.tex0.x >= 0 ? srgb_to_linear(bc.rgb) : float3(1));
     s.rough = m.base_rough.w * (m.tex0.y >= 0 ? sample_tex(m.tex0.y, uv)[m.tex1.y] : 1.0);
     s.metal = m.emit_metal.w * (m.tex0.z >= 0 ? sample_tex(m.tex0.z, uv)[m.tex1.z] : 1.0);
+    if (tint != 0) s.base *= float3(float(tint & 255u), float((tint >> 8) & 255u), float((tint >> 16) & 255u)) / 255.0;
     s.rough = clamp(s.rough, 0.02, 1.0);
     s.metal = saturate(s.metal);
     s.emission = m.emit_metal.rgb * (m.tex0.w >= 0 ? srgb_to_linear(sample_tex(m.tex0.w, uv).rgb) : float3(1));
@@ -455,6 +457,7 @@ struct FilmIn {
 };
 
 float time() { return F.lens.z; }
+float3 camera_position() { return F.cam_pos.xyz; }
 Hit no_hit() { Hit h; h.hit = false; h.inst = 0; h.prim = 0; h.bc = 0; h.t = 0; h.o2w = float3x4(0); return h; }
 float frame_number() { return F.lens.w; }
 
@@ -486,6 +489,49 @@ struct FilmPush { uint width; uint height; float time; float frame; };
 float3 film_color(int2 p) {
     p = clamp(p, int2(0, 0), int2(film_pc.width, film_pc.height) - 1);
     return film_in[(uint(p.y) * film_pc.width + uint(p.x)) * 3].rgb;
+}
+
+// ---------------------------------------------------------------- simulations
+struct Agent {
+    float3 position; float size;    // size multiplies the simulation's mesh scale
+    float3 velocity; float age;     // velocity in m/s orients the mesh; age in seconds
+    float4 color;                   // a > 0: tints the material's base colour
+    float4 data;                    // free for the program
+};
+struct SimInfo { uint count; uint index; float dt; float time; float cell_size; uint table_size; uint step; uint seed; };
+[[vk::push_constant]] ConstantBuffer<SimInfo> SIM;     // valid inside simulation init/step
+[[vk::binding(20, 0)]] StructuredBuffer<Agent> sim_agents_in;
+[[vk::binding(21, 0)]] RWStructuredBuffer<Agent> sim_agents_out;
+[[vk::binding(22, 0)]] StructuredBuffer<uint> sim_offsets;
+[[vk::binding(23, 0)]] StructuredBuffer<uint> sim_counts;
+[[vk::binding(24, 0)]] StructuredBuffer<uint> sim_sorted;
+
+/// State of agent `id` at the start of this step (all agents see the same snapshot).
+Agent agent(uint id) { return sim_agents_in[id]; }
+
+/// Iterates agents in the 27 grid cells around a point (cell = `cell_size`). Hash
+/// collisions can return far agents, so always check the distance yourself.
+struct Neighbors { int3 center; int k; uint i; uint end; };
+Neighbors neighbors(float3 p) {
+    Neighbors n;
+    n.center = int3(floor(p / max(SIM.cell_size, 1e-6)));
+    n.k = -1; n.i = 0; n.end = 0;
+    return n;
+}
+bool next_neighbor(inout Neighbors n, out uint id) {
+    id = 0;
+    if (SIM.cell_size <= 0) return false;
+    while (n.i >= n.end) {
+        n.k++;
+        if (n.k >= 27) return false;
+        int3 c = n.center + int3(n.k % 3 - 1, (n.k / 3) % 3 - 1, n.k / 9 - 1);
+        uint h = ((uint(c.x) * 73856093u) ^ (uint(c.y) * 19349663u) ^ (uint(c.z) * 83492791u)) & (SIM.table_size - 1);
+        n.i = sim_offsets[h];
+        n.end = n.i + sim_counts[h];
+    }
+    id = sim_sorted[n.i];
+    n.i++;
+    return true;
 }
 
 //@PXL_USER_CODE
@@ -626,5 +672,34 @@ void film_main(uint3 id: SV_DispatchThreadID) {
     float3 c = pxl_hook_film(f);
     if (any(isnan(c)) || any(isinf(c))) c = 0;
     film_out[i] = float4(c, f.alpha);
+}
+#endif
+
+// ---------------------------------------------------------------- simulation entry points
+#ifdef PXL_SIMULATIONS
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void sim_init(uint3 id: SV_DispatchThreadID) {
+    F.lens = float4(0, 0, SIM.time, 0);
+    pxl_load_params();
+    if (id.x >= SIM.count) return;
+    Agent a;
+    a.position = 0; a.size = 1; a.velocity = 0; a.age = 0; a.color = float4(0); a.data = float4(0);
+    uint rng = hash(id.x ^ hash(SIM.seed * 0x9e3779b9u + SIM.index * 0x85ebca6bu));
+    pxl_sim_init(SIM.index, id.x, a, rng);
+    sim_agents_out[id.x] = a;
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void sim_step(uint3 id: SV_DispatchThreadID) {
+    F.lens = float4(0, 0, SIM.time, 0);
+    pxl_load_params();
+    if (id.x >= SIM.count) return;
+    Agent a = sim_agents_in[id.x];
+    uint rng = hash(id.x ^ hash(SIM.step * 0x9e3779b9u + SIM.seed * 0x85ebca6bu + SIM.index * 0xc2b2ae35u));
+    pxl_sim_step(SIM.index, id.x, a, rng);
+    a.age += SIM.dt;
+    sim_agents_out[id.x] = a;
 }
 #endif

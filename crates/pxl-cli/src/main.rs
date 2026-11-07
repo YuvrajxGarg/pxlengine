@@ -189,7 +189,13 @@ fn render(
         sink.write(frames[i] as i64, &img, &films[i])?;
         denoised = img.denoised;
         if multi {
-            eprintln!("frame {} ({}/{total}) {:.0} ms", frames[i], i + 1, st.build_ms + st.render_ms + st.denoise_ms);
+            eprintln!(
+                "frame {} ({}/{total}) {:.0} ms{}",
+                frames[i],
+                i + 1,
+                st.sim_ms + st.build_ms + st.render_ms + st.denoise_ms,
+                if st.sim_ms > 0.0 { format!(" (sim {:.0} ms)", st.sim_ms) } else { String::new() }
+            );
         }
         last_stats = Some(st.clone());
         Ok(())
@@ -203,6 +209,9 @@ fn render(
     let mut extras = Vec::new();
     if denoised {
         extras.push("denoised".to_string());
+    }
+    if st.sim_ms > 0.0 {
+        extras.push(format!("sim {:.0} ms + build {:.0} ms + trace {:.0} ms", st.sim_ms, st.build_ms, st.render_ms));
     }
     if let Some(sh) = shutter {
         extras.push(format!("motion blur {sh} x{subframe_count}"));

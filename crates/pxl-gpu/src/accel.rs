@@ -121,6 +121,35 @@ impl Context {
     }
 
     pub fn build_tlas(&mut self, instances: &[TlasInstance]) -> Result<Accel> {
+        let bytes = instance_bytes(instances);
+        let buf = self.create_buffer(
+            bytes.len().max(64) as u64,
+            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+            MemoryLocation::CpuToGpu,
+            "tlas instances",
+        )?;
+        self.write(&buf, 0, &bytes)?;
+        let tlas = self.build_tlas_from(buf.address, instances.len() as u32);
+        self.destroy_buffer(buf);
+        tlas
+    }
+
+    /// Build a TLAS from `count` VkAccelerationStructureInstanceKHR records (64 bytes each)
+    /// already in GPU memory at `address` (e.g. written by a compute shader).
+    pub fn build_tlas_from(&mut self, address: u64, count: u32) -> Result<Accel> {
+        let geom = vk::AccelerationStructureGeometryKHR::default()
+            .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+            .geometry(vk::AccelerationStructureGeometryDataKHR {
+                instances: vk::AccelerationStructureGeometryInstancesDataKHR::default()
+                    .array_of_pointers(false)
+                    .data(vk::DeviceOrHostAddressConstKHR { device_address: address }),
+            });
+        self.build_accel(vk::AccelerationStructureTypeKHR::TOP_LEVEL, geom, count)
+    }
+}
+
+/// VkAccelerationStructureInstanceKHR records, 64 bytes each.
+pub fn instance_bytes(instances: &[TlasInstance]) -> Vec<u8> {
         let raw: Vec<vk::AccelerationStructureInstanceKHR> = instances
             .iter()
             .map(|i| vk::AccelerationStructureInstanceKHR {
@@ -135,25 +164,5 @@ impl Context {
                 },
             })
             .collect();
-        let bytes = unsafe {
-            std::slice::from_raw_parts(raw.as_ptr() as *const u8, std::mem::size_of_val(raw.as_slice()))
-        };
-        let buf = self.create_buffer(
-            bytes.len().max(64) as u64,
-            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-            MemoryLocation::CpuToGpu,
-            "tlas instances",
-        )?;
-        self.write(&buf, 0, bytes)?;
-        let geom = vk::AccelerationStructureGeometryKHR::default()
-            .geometry_type(vk::GeometryTypeKHR::INSTANCES)
-            .geometry(vk::AccelerationStructureGeometryDataKHR {
-                instances: vk::AccelerationStructureGeometryInstancesDataKHR::default()
-                    .array_of_pointers(false)
-                    .data(vk::DeviceOrHostAddressConstKHR { device_address: buf.address }),
-            });
-        let tlas = self.build_accel(vk::AccelerationStructureTypeKHR::TOP_LEVEL, geom, instances.len() as u32);
-        self.destroy_buffer(buf);
-        tlas
-    }
+        unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const u8, std::mem::size_of_val(raw.as_slice())) }.to_vec()
 }

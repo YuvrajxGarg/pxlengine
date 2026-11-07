@@ -1,0 +1,24 @@
+{"version":1,
+"programs":{
+  "source":"programs/flock.slang",
+  "params":{"center":[0,28,-40],"radius":70,"perception":1.6,
+            "separation":2.5,"alignment":1.4,"cohesion":0.6,"attraction":3.0,
+            "wander":35,"turbulence":6,"min_speed":7,"max_speed":14,"min_height":6}
+},
+"simulations":[
+  {"name":"starlings","count":100000,"init":"flock_init","step":"flock_step",
+   "cell_size":1.6,"substeps":2,"warmup":6,
+   "geometry":{"std":"bird"},"scale":0.4,
+   "materials":[{"inputs":{"base_color":[0.07,0.065,0.06],"specular_roughness":0.55}}]}
+],
+"nodes":[
+  {"type":"mesh","name":"lagoon","geometry":{"std":"grid","size":[3000,3000]},
+   "materials":[{"program":"lagoon_water"}]},
+  {"type":"camera","name":"cam","translation":[0,4,90],"target":[0,26,-40],"fov":40}
+],
+"world":{"hdri":"../assets/kloofendal_48d_partly_cloudy_puresky_2k.hdr","strength":1,"rotation":160},
+"render":{"resolution":[1280,720],"bounces":3},
+"animation":{"frame_end":191,"tracks":[
+  {"node":"cam","path":"translation","interp":"smooth","keys":[[0,[0,4,90]],[191,[10,14,30]]]},
+  {"node":"cam","path":"target","interp":"smooth","keys":[[0,[0,26,-40]],[191,[-5,26,-45]]]}
+]}}

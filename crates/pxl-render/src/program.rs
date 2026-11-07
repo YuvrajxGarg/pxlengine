@@ -26,6 +26,8 @@ pub struct ProgramSet {
     pub camera: bool,
     pub propagate: bool,
     pub film: bool,
+    /// Simulation names in scene order (index = SIM.index).
+    pub simulations: Vec<String>,
 }
 
 fn slang_type(n: usize) -> &'static str {
@@ -39,7 +41,7 @@ fn line_name(s: &str) -> String {
 impl ProgramSet {
     /// The built-in renderer with no scene programs.
     pub fn none() -> ProgramSet {
-        Self::assemble(None, &[], "", &BTreeMap::new()).expect("core shader assembles")
+        Self::assemble(None, &[], &[], "", &BTreeMap::new()).expect("core shader assembles")
     }
 
     pub fn from_scene(scene: &Scene, base_dir: &Path) -> Result<ProgramSet> {
@@ -70,12 +72,15 @@ impl ProgramSet {
                 }
             }
         }
-        Self::assemble(Some(p), &names, &user, &p.params)
+        let sims: Vec<(String, String, String)> =
+            scene.simulations.iter().map(|s| (s.name.clone(), s.init.clone(), s.step.clone())).collect();
+        Self::assemble(Some(p), &names, &sims, &user, &p.params)
     }
 
     fn assemble(
         p: Option<&Programs>,
         material_names: &[String],
+        sims: &[(String, String, String)],
         user: &str,
         params: &BTreeMap<String, serde_json::Value>,
     ) -> Result<ProgramSet> {
@@ -90,6 +95,9 @@ impl ProgramSet {
             if on {
                 let _ = writeln!(defines, "#define PXL_HOOK_{name} 1");
             }
+        }
+        if !sims.is_empty() {
+            defines.push_str("#define PXL_SIMULATIONS 1\n");
         }
 
         // Params: one float4 slot each, exposed as P.<name>.
@@ -129,6 +137,15 @@ impl ProgramSet {
             let _ = writeln!(wrap, "    case {id}: {name}(s, i); break;");
         }
         wrap.push_str("    default: break;\n    }\n}\n");
+        for (kind, pick) in [("init", 1usize), ("step", 2usize)] {
+            let _ = writeln!(wrap, "void pxl_sim_{kind}(uint sim, uint id, inout Agent a, inout uint rng) {{\n    switch (sim) {{");
+            for (i, s) in sims.iter().enumerate() {
+                let f = if pick == 1 { &s.1 } else { &s.2 };
+                let _ = writeln!(wrap, "    case {i}: {f}(id, a, rng); break;");
+            }
+            wrap.push_str("    default: break;\n    }\n}\n");
+        }
+        set.simulations = sims.iter().map(|s| s.0.clone()).collect();
 
         let Some((head, tail)) = CORE.split_once(MARKER) else { bail!("core shader is missing {MARKER}") };
         let body_line = head.lines().count() + 1;

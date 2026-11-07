@@ -14,6 +14,7 @@ geometry (`std` selects the generator; all have UVs):
 - `{"std":"box","size":[x,y,z]}`
 - `{"std":"cylinder","radius":1,"height":2,"segments":64}`   Y axis, capped
 - `{"std":"torus","radius":1,"tube":0.25,"segments":64}`     XZ plane
+- `{"std":"bird"}`   low-poly bird, wingspan 1, +Z forward (for simulations)
 
 material inputs (OpenPBR names, defaults shown):
 - `base_color` [0.8,0.8,0.8]  ·  `base_color_texture` "albedo.jpg" (sRGB, multiplies)
