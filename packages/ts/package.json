@@ -1,0 +1,20 @@
+{
+  "name": "@pxlengine/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for pxlengine: typed scene JSON + rendering through the pxl binary",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "files": ["dist/src"],
+  "scripts": {
+    "gen-types": "node scripts/gen-types.mjs",
+    "build": "tsc -p .",
+    "test": "npm run build && node --test \"dist/test/*.test.js\""
+  },
+  "license": "MIT OR Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "json-schema-to-typescript": "^15.0.4",
+    "typescript": "^5.7.2"
+  }
+}

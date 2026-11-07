@@ -4,10 +4,11 @@
 //! e.g. `{"node":"cam","path":"translation","keys":[[0,[0,1,5]],[48,[4,1,3]]],"interp":"spline"}`.
 
 use anyhow::{anyhow, bail, Result};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Animation {
     #[serde(default)]
@@ -61,7 +62,7 @@ impl Animation {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Interp {
     #[default]
@@ -74,7 +75,7 @@ pub enum Interp {
     Step,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Orbit {
     #[serde(default)]
@@ -95,7 +96,7 @@ fn full_turn() -> f32 {
     360.0
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Track {
     /// Node `name`; omit to address the scene root (e.g. "world/strength").

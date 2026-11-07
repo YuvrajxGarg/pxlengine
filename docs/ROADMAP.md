@@ -85,5 +85,12 @@ There is no editor.
       Known gaps: surfaces stay slightly lumpy (isotropic kernels; no anisotropic smoothing);
       no obstacles inside the box, no emitters/sinks, no spray/foam/bubbles; volume drifts a
       little (no density correction); no caustics through glass/water.
-- [ ] **7. Agent ergonomics** – token-budgeted help (~2.5k tokens first page), `help field`
-      lookups, Python/TypeScript SDKs, benchmarks vs Blender.
+- [x] **7. Agent ergonomics + benchmarks** (done 2026-11-07) – JSON Schema generated from the
+      scene types (`pxl schema`, schemars + doc comments); `pxl help field <path>` lookups from
+      that schema; `pxl check` (frames, files, program compilation, no GPU); test-enforced help
+      budget (first page ~650 tokens); Python SDK (no deps, unittest) and TypeScript SDK (types
+      generated from the schema, node:test); Blender importer + benchmark runner. At 1080p /
+      64 spp / 8 bounces / OIDN on an RTX 4080 Laptop, pxl's whole command takes 0.7-1.0 s vs
+      6.8-7.8 s for Blender 5.2 Cycles (OptiX) — timings at matched settings, not equal quality
+      (see benchmarks/README.md). The comparison also found pxl's HDRI mapping mirrored vs
+      Blender; pxl now uses Blender's equirectangular convention.

@@ -5,6 +5,7 @@ use pxl_scene::Scene;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+mod check;
 mod help;
 mod output;
 mod plate;
@@ -56,10 +57,15 @@ enum Cmd {
     },
     /// Print help topics (agent documentation).
     Help {
-        /// Topic name, or `all` / `--all` for every topic.
+        /// Topic name, `all`, `sizes`, or `field <path>` (e.g. `field camera.fov`).
         #[arg(allow_hyphen_values = true)]
         topic: Option<String>,
+        rest: Vec<String>,
     },
+    /// Validate a scene without rendering: schema, every frame, referenced files, programs.
+    Check { scene: PathBuf },
+    /// Print the JSON Schema of scene files.
+    Schema,
     /// Show the GPU pxl will use.
     Info,
 }
@@ -73,7 +79,12 @@ fn main() {
 
 fn run() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Help { topic } => help::print(topic.as_deref()),
+        Cmd::Help { topic, rest } => help::print(topic.as_deref(), &rest),
+        Cmd::Check { scene } => check::run(&scene),
+        Cmd::Schema => {
+            println!("{}", serde_json::to_string_pretty(&pxl_scene::reference::json_schema())?);
+            Ok(())
+        }
         Cmd::Info => {
             let ctx = pxl_gpu::Context::new()?;
             println!("device:  {}", ctx.info.name);

@@ -11,6 +11,14 @@ pxl info                       # GPU / slangc / cache
 pxl render examples/first-scene.json --profile std/final --out out/first.png
 ```
 
+## SDKs, tools, benchmarks
+
+- `packages/python` — Python SDK (`from pxl import Scene, mesh, sphere ...`; `scene.render(...)`)
+- `packages/ts` — TypeScript SDK with scene types generated from `pxl schema`
+- `pxl check scene.json`, `pxl help field camera.fov`, `pxl schema`, `pxl track`
+- `integrations/blender/import_pxl.py` — open a pxl scene in Blender
+- `benchmarks/` — pxl vs Blender Cycles/EEVEE timings and method
+
 ## Build
 
 Requirements: Rust (MSVC on Windows), the Vulkan SDK (for `slangc`), and a GPU with
@@ -33,7 +41,7 @@ cargo build --release
 - `docs/help/` — agent-facing help topics (embedded)
 - `docs/ROADMAP.md` — phased plan and known gaps
 
-Status: phases 1-6 complete (GPU path tracer; glTF/texture/HDRI import, animation, video;
+Status: all roadmap phases (1-7) complete (GPU path tracer; glTF/texture/HDRI import, animation, video;
 OIDN denoising, depth of field, motion blur, compositing passes, EXR; scene Slang programs
 for materials, cameras, light propagation and film - see `examples/black-hole.json`;
 GPU agent simulations with neighbour search - see `examples/birds-1m.json`, a million boids;

@@ -339,16 +339,25 @@ float3 sample_brdf(Surface s, float3 v, inout uint rng) {
 // ---------------------------------------------------------------- environment
 bool has_env() { return F.misc.z > 0; }
 
+// Equirectangular mapping identical to Blender/Cycles (the convention HDRIs are authored for),
+// expressed in pxl's Y-up frame: Blender's (x, y, z) = pxl's (x, -z, y). `world.rotation`
+// turns the environment like Blender's Mapping node rotating about its up axis.
 float2 dir_to_uv(float3 d) {
-    float u = frac(0.5 + atan2(d.x, -d.z) / (2 * PI) - F.envp.x);
+    float r = F.envp.x * 2 * PI;
+    float2 b = float2(d.x, -d.z);                               // Blender ground plane
+    b = float2(b.x * cos(r) - b.y * sin(r), b.x * sin(r) + b.y * cos(r));
+    float u = frac(0.5 - atan2(b.y, -b.x) / (2 * PI));
     float v = acos(clamp(d.y, -1.0, 1.0)) / PI;
     return float2(u, v);
 }
 
 float3 uv_to_dir(float2 uv) {
-    float phi = (frac(uv.x + F.envp.x) - 0.5) * 2 * PI;
-    float th = uv.y * PI;
-    return float3(sin(th) * sin(phi), cos(th), -sin(th) * cos(phi));
+    float r = F.envp.x * 2 * PI;
+    float a = (0.5 - uv.x) * 2 * PI;
+    float st = sin(uv.y * PI);
+    float2 b = float2(-cos(a) * st, sin(a) * st);               // rotated Blender ground plane
+    b = float2(b.x * cos(r) + b.y * sin(r), -b.x * sin(r) + b.y * cos(r));   // undo rotation
+    return float3(b.x, cos(uv.y * PI), -b.y);
 }
 
 float3 env_pixel(uint x, uint y) {

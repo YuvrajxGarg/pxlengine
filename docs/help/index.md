@@ -12,6 +12,9 @@ Write a scene as JSON, render it, look at the image, revise. No editor.
     pxl help simulations  # millions of GPU agents: flocks, swarms, particles
     pxl help vfx      # CG over real footage: plates, tracked cameras, shadow catchers
     pxl help fluids   # liquid simulation, glass and water materials
+    pxl help field camera.fov     # one field: type, default, meaning (any path)
+    pxl check shot.json           # validate files, frames and programs without rendering
+    pxl schema                    # JSON Schema of scene files
     pxl info          # which GPU is used
 
 ## First scene

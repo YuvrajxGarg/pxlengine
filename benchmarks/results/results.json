@@ -1,0 +1,54 @@
+{
+ "meta": {
+  "gpu": "NVIDIA GeForce RTX 4080 Laptop GPU",
+  "blender": "Blender 5.2.3 LTS",
+  "os": "Windows-11-10.0.26200-SP0",
+  "width": 1920,
+  "height": 1080,
+  "samples": 64,
+  "bounces": 8,
+  "runs": 3
+ },
+ "rows": [
+  {
+   "scene": "first-scene",
+   "pxl_s": 0.6818961999997555,
+   "cycles_s": 6.855219500000203,
+   "cycles_render_s": 5.221,
+   "eevee_s": 3.1964087000005748,
+   "eevee_render_s": 1.509
+  },
+  {
+   "scene": "materials",
+   "pxl_s": 0.7270447999999305,
+   "cycles_s": 6.826006199999938,
+   "cycles_render_s": 5.217,
+   "eevee_s": 3.143776099999741,
+   "eevee_render_s": 1.491
+  },
+  {
+   "scene": "helmet (glTF + HDRI)",
+   "pxl_s": 0.981958599999416,
+   "cycles_s": 7.661300699999629,
+   "cycles_render_s": 5.743,
+   "eevee_s": 3.6344375999997283,
+   "eevee_render_s": 1.542
+  },
+  {
+   "scene": "depth of field",
+   "pxl_s": 0.9790201000005254,
+   "cycles_s": 7.780736600000637,
+   "cycles_render_s": 5.768,
+   "eevee_s": 3.74921329999961,
+   "eevee_render_s": 1.675
+  },
+  {
+   "scene": "glass",
+   "pxl_s": 0.7714153999995688,
+   "cycles_s": 7.435834700000669,
+   "cycles_render_s": 5.682,
+   "eevee_s": 3.2430052999998225,
+   "eevee_render_s": 1.458
+  }
+ ]
+}

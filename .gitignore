@@ -6,3 +6,7 @@
 /assets
 /vendor
 /examples/vfx/generated
+node_modules/
+/packages/ts/dist
+/benchmarks/results/*.png
+__pycache__/

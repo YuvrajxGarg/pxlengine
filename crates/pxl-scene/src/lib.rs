@@ -3,11 +3,13 @@
 
 pub mod anim;
 pub mod geometry;
+pub mod reference;
 pub mod track;
 
 use anyhow::{bail, Context, Result};
 use glam::{EulerRot, Mat4, Quat, Vec3};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use anim::{Animation, Interp, Orbit, Track};
@@ -15,7 +17,7 @@ pub use geometry::MeshData;
 
 pub const SCENE_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Scene {
     pub version: u32,
@@ -45,7 +47,7 @@ pub struct Scene {
 }
 
 /// A liquid simulated with FLIP on a grid inside a closed box and rendered as a mesh.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Fluid {
     pub name: String,
@@ -82,7 +84,7 @@ pub struct Fluid {
     pub materials: Vec<Material>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FluidBlock {
     pub min: [f32; 3],
@@ -128,7 +130,7 @@ impl Fluid {
 
 /// Footage (or a still) that CG is composited over. Frame `f` of the scene uses plate frame
 /// `f + offset`. Shadow catchers darken it, holdouts and the `matte` reveal it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Plate {
     /// Video (.mp4/.mov/...), image sequence with a `#` run (plate_####.png) or a single image.
@@ -144,7 +146,7 @@ pub struct Plate {
 }
 
 /// A population of GPU agents stepped by scene programs and drawn as instances of one mesh.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Simulation {
     pub name: String,
@@ -185,7 +187,7 @@ fn yes() -> bool {
 }
 
 /// Scene-supplied Slang code hooked into the renderer. See `pxl help programs`.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Programs {
     /// Slang file, relative to the scene file.
@@ -262,7 +264,7 @@ fn is_ident(s: &str) -> bool {
     !s.is_empty() && !s.starts_with(|c: char| c.is_ascii_digit()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Node {
     Mesh(MeshNode),
@@ -276,7 +278,7 @@ pub fn trs(t: [f32; 3], r_deg: [f32; 3], s: [f32; 3]) -> Mat4 {
     Mat4::from_scale_rotation_translation(Vec3::from(s), Quat::from_euler(EulerRot::XYZ, r[0], r[1], r[2]), Vec3::from(t))
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MeshNode {
     #[serde(default)]
@@ -300,7 +302,7 @@ impl MeshNode {
 }
 
 /// A glTF 2.0 file (.glb or .gltf) placed in the scene.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssetNode {
     #[serde(default)]
@@ -321,7 +323,7 @@ impl AssetNode {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "std", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Geometry {
     Sphere {
@@ -360,7 +362,7 @@ pub enum Geometry {
 }
 
 /// OpenPBR-style input names (the same vocabulary MaterialX uses).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Material {
     #[serde(default)]
@@ -374,7 +376,7 @@ pub struct Material {
 }
 
 /// Material roles for VFX: proxies of real-world things in the plate.
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// Ordinary CG surface.
@@ -396,7 +398,7 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MaterialInputs {
     #[serde(default = "grey")]
@@ -447,7 +449,7 @@ impl Default for MaterialInputs {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum LightShape {
     Point,
@@ -455,7 +457,7 @@ pub enum LightShape {
     Directional,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Size2 {
     Uniform(f32),
@@ -471,7 +473,7 @@ impl Size2 {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LightNode {
     #[serde(default)]
@@ -493,7 +495,7 @@ pub struct LightNode {
     pub size: Size2,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CameraNode {
     #[serde(default)]
@@ -572,7 +574,7 @@ impl CameraNode {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct World {
     /// Uniform environment radiance (used when no `hdri`).
@@ -594,7 +596,7 @@ impl Default for World {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum View {
     /// Blender-style AgX filmic curve (default): soft highlights, no hue skew.
@@ -605,7 +607,7 @@ pub enum View {
     Standard,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RenderSettings {
     #[serde(default = "res")]
