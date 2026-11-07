@@ -47,6 +47,11 @@ pub struct PbrMaterial {
     pub normal_scale: f32,
     pub alpha_mask: bool,
     pub alpha_cutoff: f32,
+    /// KHR_materials_transmission / ior / volume.
+    pub transmission: f32,
+    pub ior: f32,
+    pub attenuation_color: [f32; 3],
+    pub attenuation_distance: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +127,14 @@ pub fn load_gltf(path: &Path) -> Result<GltfAsset> {
                 normal_scale: m.normal_texture().map(|i| i.scale()).unwrap_or(1.0),
                 alpha_mask,
                 alpha_cutoff: m.alpha_cutoff().unwrap_or(0.5),
+                transmission: m.transmission().map(|t| t.transmission_factor()).unwrap_or(0.0),
+                ior: m.ior().unwrap_or(1.5),
+                attenuation_color: m.volume().map(|v| v.attenuation_color()).unwrap_or([1.0; 3]),
+                attenuation_distance: m
+                    .volume()
+                    .map(|v| v.attenuation_distance())
+                    .filter(|d| d.is_finite())
+                    .unwrap_or(0.0),
             };
             if matches!(m.alpha_mode(), gltf::material::AlphaMode::Blend) {
                 warnings.push(format!("material {:?}: alpha BLEND rendered as MASK", m.name()));

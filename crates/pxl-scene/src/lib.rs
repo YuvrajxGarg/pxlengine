@@ -34,12 +34,96 @@ pub struct Scene {
     /// Background footage the render is composited over.
     #[serde(default)]
     pub plate: Option<Plate>,
+    #[serde(default)]
+    pub fluids: Vec<Fluid>,
     /// The JSON this scene was parsed from; animation tracks are applied to it per frame.
     #[serde(skip)]
     raw: Value,
     /// Frame this scene was evaluated at (0 for a static scene).
     #[serde(skip)]
     pub frame: f64,
+}
+
+/// A liquid simulated with FLIP on a grid inside a closed box and rendered as a mesh.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fluid {
+    pub name: String,
+    /// Closed container [min, max] in metres; walls are solid.
+    pub bounds: [[f32; 3]; 2],
+    /// Grid cells along the longest side of `bounds` (16..256).
+    #[serde(default = "fluid_res")]
+    pub resolution: u32,
+    /// Liquid present at time 0 (and after warm-up): boxes with optional initial velocity.
+    pub fill: Vec<FluidBlock>,
+    #[serde(default = "eight")]
+    pub particles_per_cell: u32,
+    /// Simulation steps per frame; raise for fast, splashy motion.
+    #[serde(default = "eight")]
+    pub substeps: u32,
+    /// 0 = PIC (smooth, viscous), 1 = FLIP (lively, noisy); 0.95 is typical.
+    #[serde(default = "flip")]
+    pub flip: f32,
+    #[serde(default = "gravity")]
+    pub gravity: [f32; 3],
+    #[serde(default = "pressure_iters")]
+    pub pressure_iterations: u32,
+    /// Surface mesh resolution relative to the grid (1..3).
+    #[serde(default = "two_u32")]
+    pub surface_refine: u32,
+    /// Particle radius for the surface, in surface cells (larger = smoother, softer detail).
+    #[serde(default = "two_f")]
+    pub particle_radius: f32,
+    #[serde(default)]
+    pub warmup: f32,
+    #[serde(default = "max_tris")]
+    pub max_triangles: u32,
+    #[serde(default)]
+    pub materials: Vec<Material>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FluidBlock {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    #[serde(default)]
+    pub velocity: [f32; 3],
+}
+
+fn fluid_res() -> u32 {
+    64
+}
+fn eight() -> u32 {
+    8
+}
+fn flip() -> f32 {
+    0.95
+}
+fn gravity() -> [f32; 3] {
+    [0.0, -9.81, 0.0]
+}
+fn pressure_iters() -> u32 {
+    80
+}
+fn two_u32() -> u32 {
+    2
+}
+fn two_f() -> f32 {
+    2.0
+}
+fn max_tris() -> u32 {
+    2_000_000
+}
+
+impl Fluid {
+    /// (cells per axis, cell size)
+    pub fn grid(&self) -> ([u32; 3], f32) {
+        let size = Vec3::from(self.bounds[1]) - Vec3::from(self.bounds[0]);
+        let h = size.max_element() / self.resolution as f32;
+        let n = (size / h).round().max(Vec3::splat(4.0));
+        ([n.x as u32, n.y as u32, n.z as u32], h)
+    }
 }
 
 /// Footage (or a still) that CG is composited over. Frame `f` of the scene uses plate frame
@@ -344,6 +428,17 @@ pub struct MaterialInputs {
     /// Texture tiling.
     #[serde(default = "one2")]
     pub uv_scale: [f32; 2],
+    /// 0 = opaque, 1 = glass / water (refracts; reflection by Fresnel from `specular_ior`).
+    #[serde(default)]
+    pub transmission_weight: f32,
+    /// Index of refraction: water 1.33, glass 1.5, diamond 2.42.
+    #[serde(default = "ior")]
+    pub specular_ior: f32,
+    /// Colour of light after travelling `transmission_depth` metres inside (0 = thin tint).
+    #[serde(default = "one3")]
+    pub transmission_color: [f32; 3],
+    #[serde(default)]
+    pub transmission_depth: f32,
 }
 
 impl Default for MaterialInputs {
@@ -610,6 +705,32 @@ impl Scene {
                 return Err(ctx("duplicate simulation name".into()));
             }
         }
+        for (i, f) in self.fluids.iter().enumerate() {
+            let ctx = |m: String| anyhow::anyhow!("fluids[{i}] '{}': {m}", f.name);
+            let (lo, hi) = (Vec3::from(f.bounds[0]), Vec3::from(f.bounds[1]));
+            if !(hi.cmpgt(lo).all()) {
+                return Err(ctx("bounds must be [min, max] with max > min on every axis".into()));
+            }
+            if !(16..=256).contains(&f.resolution) || !(1..=64).contains(&f.particles_per_cell)
+                || !(1..=64).contains(&f.substeps) || !(1..=3).contains(&f.surface_refine)
+                || !(0.0..=1.0).contains(&f.flip) || f.pressure_iterations == 0
+            {
+                return Err(ctx("resolution 16..256, particles_per_cell 1..64, substeps 1..64, surface_refine 1..3, flip 0..1".into()));
+            }
+            if f.fill.is_empty() {
+                return Err(ctx("needs at least one `fill` block of liquid".into()));
+            }
+            for b in &f.fill {
+                let (bl, bh) = (Vec3::from(b.min), Vec3::from(b.max));
+                if !(bh.cmpgt(bl).all()) || bl.cmplt(lo).any() || bh.cmpgt(hi).any() {
+                    return Err(ctx("each fill block must have max > min and lie inside `bounds`".into()));
+                }
+            }
+            let ([nx, ny, nz], _) = f.grid();
+            if nx as u64 * ny as u64 * nz as u64 > 16_000_000 {
+                return Err(ctx("grid too large (lower resolution)".into()));
+            }
+        }
         if let Some(p) = &self.programs {
             p.validate(&self.nodes, !self.simulations.is_empty())?;
         }
@@ -681,6 +802,7 @@ impl Scene {
 }
 
 fn one() -> f32 { 1.0 }
+fn ior() -> f32 { 1.5 }
 fn two() -> f32 { 2.0 }
 fn half() -> f32 { 0.5 }
 fn quarter() -> f32 { 0.25 }
@@ -757,6 +879,21 @@ mod tests {
         assert!(format!("{:#}", Scene::from_json(&no_programs).unwrap_err()).contains("programs"));
         let too_many = ok.replace(r#""count":10"#, r#""count":20000000"#);
         assert!(Scene::from_json(&too_many).is_err());
+    }
+
+    #[test]
+    fn fluids_validate() {
+        let ok = r#"{"version":1,"nodes":[{"type":"camera"}],"fluids":[{"name":"w",
+            "bounds":[[0,0,0],[2,1,1]],"resolution":32,"fill":[{"min":[0.1,0.1,0.1],"max":[0.5,0.5,0.5]}]}]}"#;
+        let s = Scene::from_json(ok).unwrap();
+        let (n, h) = s.fluids[0].grid();
+        assert_eq!(n, [32, 16, 16]);
+        assert!((h - 0.0625).abs() < 1e-6);
+        let outside = ok.replace(r#""max":[0.5,0.5,0.5]"#, r#""max":[0.5,0.5,1.5]"#);
+        assert!(format!("{:#}", Scene::from_json(&outside).unwrap_err()).contains("inside"));
+        let glass = r#"{"version":1,"nodes":[{"type":"camera"},{"type":"mesh","geometry":{"std":"sphere"},
+            "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.33}}]}]}"#;
+        assert!(Scene::from_json(glass).is_ok());
     }
 
     #[test]

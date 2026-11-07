@@ -1,0 +1,26 @@
+{"version":1,
+"fluids":[{
+  "name":"water","bounds":[[-1,0,-0.5],[1,1.2,0.5]],"resolution":64,
+  "fill":[{"min":[-0.97,0.03,-0.47],"max":[-0.35,0.95,0.47]}],
+  "substeps":8,"flip":0.95,
+  "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.33,"specular_roughness":0,
+                          "transmission_color":[0.45,0.85,0.92],"transmission_depth":0.8}}]
+}],
+"nodes":[
+  {"type":"mesh","name":"floor","geometry":{"std":"grid","size":[30,30]},"materials":[{"program":"tiles"}]},
+  {"type":"mesh","name":"tank floor","translation":[0,-0.015,0],"geometry":{"std":"box","size":[2.06,0.03,1.06]},
+   "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.5,"specular_roughness":0}}]},
+  {"type":"mesh","name":"tank front","translation":[0,0.6,0.515],"geometry":{"std":"box","size":[2.06,1.2,0.03]},
+   "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.5,"specular_roughness":0}}]},
+  {"type":"mesh","name":"tank back","translation":[0,0.6,-0.515],"geometry":{"std":"box","size":[2.06,1.2,0.03]},
+   "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.5,"specular_roughness":0}}]},
+  {"type":"mesh","name":"tank left","translation":[-1.015,0.6,0],"geometry":{"std":"box","size":[0.03,1.2,1.0]},
+   "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.5,"specular_roughness":0}}]},
+  {"type":"mesh","name":"tank right","translation":[1.015,0.6,0],"geometry":{"std":"box","size":[0.03,1.2,1.0]},
+   "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.5,"specular_roughness":0}}]},
+  {"type":"camera","name":"cam","translation":[1.2,1.5,2.9],"target":[0,0.35,0],"fov":40}
+],
+"programs":{"source":"programs/showcase.slang","params":{"marble_scale":1,"lava_glow":1,"tile_size":2.0,"aberration":0,"vignette":0,"grain":0,"fisheye_fov":180}},
+"world":{"hdri":"../assets/studio_small_09_2k.hdr","strength":0.9,"rotation":60},
+"render":{"resolution":[1280,720],"bounces":12},
+"animation":{"frame_end":119}}

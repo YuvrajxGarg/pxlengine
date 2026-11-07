@@ -75,7 +75,15 @@ There is no editor.
       Known gaps: no camera solver (bring a .chan from a tracker); shadow catchers don't show
       CG reflections on the real floor; plate lighting must be matched by hand (HDRI/lights);
       no lens distortion model; single-layer holdouts (no soft roto edges beyond the matte).
-- [ ] **6b. Fluids library** – APIC/FLIP liquid on a uniform grid as Slang compute programs,
-      surface reconstruction, rendering as a dielectric (needs a glass/transmission BSDF).
+- [x] **6b. Fluids + glass** (done 2026-11-07) – dielectric BSDF (Fresnel reflect/refract, GGX
+      rough transmission, Beer-Lambert absorption, glass lets shadow rays through; glTF
+      KHR_materials_transmission/ior/volume). FLIP/PIC liquid on a GPU MAC grid in Slang:
+      fixed-point atomic P2G, red-black Gauss-Seidel pressure, RK2 advection, closed box walls;
+      surface nets meshing each frame straight into reserved vertex/index buffer space + a
+      per-frame BLAS. Dam break: 139k particles, 64-cell grid, 8 substeps ≈ 12 ms/frame; 120
+      frames at 1280x720 rendered in 18 s. Not APIC yet (FLIP/PIC blend).
+      Known gaps: surfaces stay slightly lumpy (isotropic kernels; no anisotropic smoothing);
+      no obstacles inside the box, no emitters/sinks, no spray/foam/bubbles; volume drifts a
+      little (no density correction); no caustics through glass/water.
 - [ ] **7. Agent ergonomics** – token-budgeted help (~2.5k tokens first page), `help field`
       lookups, Python/TypeScript SDKs, benchmarks vs Blender.

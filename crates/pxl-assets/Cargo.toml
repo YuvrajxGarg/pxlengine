@@ -6,6 +6,6 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 glam.workspace = true
-gltf = { version = "1", features = ["KHR_materials_emissive_strength"] }
+gltf = { version = "1", features = ["KHR_materials_emissive_strength", "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_volume"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr", "exr", "rayon"] }
 pxl-scene = { path = "../pxl-scene" }

@@ -2,6 +2,7 @@
 
 pub mod film;
 mod library;
+mod fluid;
 mod program;
 mod sim;
 
@@ -84,6 +85,9 @@ pub struct FrameStats {
     pub denoise_ms: f64,
     pub subframes: usize,
     pub sim_ms: f64,
+    /// Fluid particles simulated this frame.
+    pub fluid_particles: usize,
+    pub fluid_triangles: usize,
 }
 
 pub(crate) fn bytes<T: Copy>(v: &[T]) -> &[u8] {
@@ -98,6 +102,8 @@ pub struct Renderer {
     film_pipe: Option<ComputePipeline>,
     sim_kernels: Option<sim::SimKernels>,
     sims: Vec<sim::SimState>,
+    fluid_kernels: Option<fluid::FluidKernels>,
+    fluids: Vec<fluid::FluidState>,
 }
 
 /// Static (whole-render) GPU data.
@@ -110,6 +116,8 @@ struct Shared {
     env_marg: Buffer,
     env_cond: Buffer,
     env: Option<(u32, u32, f32)>,
+    fluid_vbase: u32,
+    fluid_ibase: u32,
 }
 
 impl Renderer {
@@ -137,7 +145,17 @@ impl Renderer {
         } else {
             Some(sim::SimKernels::new(&mut ctx, &programs.source)?)
         };
-        Ok(Renderer { ctx, pipe, denoiser: None, programs, film_pipe, sim_kernels, sims: Vec::new() })
+        Ok(Renderer {
+            ctx,
+            pipe,
+            denoiser: None,
+            programs,
+            film_pipe,
+            sim_kernels,
+            sims: Vec::new(),
+            fluid_kernels: None,
+            fluids: Vec::new(),
+        })
     }
 
     /// Name of the denoiser device, or why it's unavailable.
@@ -183,7 +201,32 @@ impl Renderer {
             }
             prepared.push(list);
         }
-        let shared = self.upload_shared(&mut lib)?;
+        // Fluids: materials now (textures upload with the library), buffers after the upload
+        // so their meshes can live in reserved space at the end of the vertex/index buffers.
+        let fluid_specs: Vec<pxl_scene::Fluid> = prepared.first().map(|f| f[0].0.fluids.clone()).unwrap_or_default();
+        let mut fluid_mats = Vec::new();
+        let (mut reserve_v, mut reserve_i) = (0u32, 0u32);
+        for f in &fluid_specs {
+            fluid_mats.push(lib.fluid_material(f)?);
+            let (v, i) = fluid::FluidState::reservation(f);
+            reserve_v += v;
+            reserve_i += i;
+        }
+        let shared = self.upload_shared(&mut lib, reserve_v, reserve_i)?;
+        self.fluids.clear();
+        if !fluid_specs.is_empty() && self.fluid_kernels.is_none() {
+            self.fluid_kernels = Some(fluid::FluidKernels::new(&mut self.ctx)?);
+        }
+        let (mut vb, mut ib) = (shared.fluid_vbase, shared.fluid_ibase);
+        for (f, (mat, opaque)) in fluid_specs.iter().zip(fluid_mats) {
+            let fps = prepared[0][0].0.render.fps as f64;
+            let st = fluid::FluidState::new(&mut self.ctx, f, fps, vb, ib, mat, opaque, opts.seed)
+                .with_context(|| format!("fluid '{}'", f.name))?;
+            let (v, i) = fluid::FluidState::reservation(f);
+            vb += v;
+            ib += i;
+            self.fluids.push(st);
+        }
         let mut warnings = std::mem::take(&mut lib.warnings);
         for (i, subframes) in prepared.iter().enumerate() {
             let center = (subframes[0].0.frame + subframes[subframes.len() - 1].0.frame) * 0.5;
@@ -192,15 +235,27 @@ impl Renderer {
             for si in 0..self.sims.len() {
                 self.sim_advance(si, center, &params).with_context(|| format!("simulation '{}'", self.sims[si].name))?;
             }
+            for fi in 0..self.fluids.len() {
+                self.fluid_advance(fi, center, shared.vbuf, shared.ibuf)
+                    .with_context(|| format!("fluid '{}'", self.fluids[fi].name))?;
+                if self.fluids[fi].overflow {
+                    let msg = format!("fluid '{}' surface hit max_triangles; raise it", self.fluids[fi].name);
+                    if !warnings.contains(&msg) {
+                        warnings.push(msg);
+                    }
+                }
+            }
             let sim_ms = t.elapsed().as_secs_f64() * 1e3;
             let (img, mut stats) = self.render_frame(&lib, &shared, subframes, center, opts, &mut warnings)?;
             stats.sim_ms = sim_ms;
+            stats.fluid_particles = self.fluids.iter().map(|f| f.particle_count() as usize).sum();
+            stats.fluid_triangles = self.fluids.iter().map(|f| f.triangles as usize).sum();
             sink(i, img, &stats)?;
         }
         Ok(warnings)
     }
 
-    fn upload_shared(&mut self, lib: &mut Library) -> Result<Shared> {
+    fn upload_shared(&mut self, lib: &mut Library, reserve_v: u32, reserve_i: u32) -> Result<Shared> {
         let ctx = &mut self.ctx;
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
         let as_input = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
@@ -224,8 +279,18 @@ impl Renderer {
             verts.push([0.0; 4]);
             indices.push(0);
         }
-        let vbuf = ctx.create_buffer_init(bytes(&verts), storage | as_input, "vertices")?;
-        let ibuf = ctx.create_buffer_init(bytes(&indices), storage | as_input, "indices")?;
+        // Reserved space after the static geometry is written by GPU programs (fluid meshes).
+        let fluid_vbase = (verts.len() / 2) as u32;
+        let fluid_ibase = indices.len() as u32;
+        let vbuf = ctx.create_buffer(
+            (verts.len() as u64 + reserve_v as u64 * 2) * 16,
+            storage | as_input,
+            MemoryLocation::CpuToGpu,
+            "vertices",
+        )?;
+        ctx.write(&vbuf, 0, bytes(&verts))?;
+        let ibuf = ctx.create_buffer((indices.len() as u64 + reserve_i as u64) * 4, storage | as_input, MemoryLocation::CpuToGpu, "indices")?;
+        ctx.write(&ibuf, 0, bytes(&indices))?;
         for m in &mut lib.meshes {
             let blas = ctx.build_blas(&BlasInput {
                 vertex_address: vbuf.address + m.vertex_offset as u64 * 32,
@@ -274,7 +339,7 @@ impl Renderer {
                 )
             }
         };
-        Ok(Shared { vbuf, ibuf, tex_info, texels, env_pix, env_marg, env_cond, env })
+        Ok(Shared { vbuf, ibuf, tex_info, texels, env_pix, env_marg, env_cond, env, fluid_vbase, fluid_ibase })
     }
 
     /// Render one frame: subframes (shutter samples for motion blur) accumulate into the same
@@ -443,7 +508,7 @@ impl Renderer {
 
         // ---- instances, materials, emissive triangles
         let mut inst_rec: Vec<[u32; 16]> = Vec::with_capacity(insts.len() + 1);
-        let mut mats: Vec<[f32; 24]> = Vec::with_capacity(insts.len() + 1);
+        let mut mats: Vec<library::GpuMaterial> = Vec::with_capacity(insts.len() + 1);
         let mut emissive: Vec<[f32; 4]> = Vec::new();
         let mut weights: Vec<f64> = Vec::new();
         let mut tlas_inst = Vec::with_capacity(insts.len());
@@ -593,6 +658,30 @@ impl Renderer {
         frame.extend_from_slice(bytes(&[aperture, focus, time, scene.frame as f32]));
 
         // ---- upload per-frame data; simulation agents are appended on the GPU
+        // Fluid surfaces: one instance each, identity transform, mesh in the reserved region.
+        for (fi, fl) in self.fluids.iter().enumerate() {
+            let Some(blas) = fl.blas else { continue };
+            let idx = inst_rec.len() as u32;
+            let mut r = [0u32; 16];
+            r[0] = fl.vbase;
+            r[1] = fl.ibase;
+            r[2] = mats.len() as u32;
+            r[3] = NONE;
+            r[4] = 1f32.to_bits();
+            r[7] = (scene.nodes.len() + scene.simulations.len() + fi) as u32;
+            r[9] = 1f32.to_bits();
+            r[14] = 1f32.to_bits();
+            inst_rec.push(r);
+            mats.push(fl.material);
+            tlas_inst.push(TlasInstance {
+                transform: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                custom_index: idx,
+                mask: 0x01,
+                blas_address: blas.address,
+            });
+            stats.triangles += fl.triangles as usize;
+            stats.instances += 1;
+        }
         let static_count = inst_rec.len() as u32;
         let sim_mat_base = mats.len() as u32;
         let mut sim_total = 0u32;
@@ -621,7 +710,7 @@ impl Renderer {
         let ctx = &mut self.ctx;
         let tlas = ctx.build_tlas_from(desc_buf.address, total)?;
         ctx.destroy_buffer(desc_buf);
-        mats.push([0.0; 24]);
+        mats.push([0.0; 32]);
         lights.push([0.0; 16]);
         emissive.push([0.0; 4]);
         let mat_buf = ctx.create_buffer_init(bytes(&mats), storage, "materials")?;

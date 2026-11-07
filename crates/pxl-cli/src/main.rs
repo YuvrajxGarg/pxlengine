@@ -276,6 +276,9 @@ fn render(
     if denoised {
         extras.push("denoised".to_string());
     }
+    if st.fluid_particles > 0 {
+        extras.push(format!("fluid {} particles -> {} tris", st.fluid_particles, st.fluid_triangles));
+    }
     if st.sim_ms > 0.5 {
         extras.push(format!("sim {:.0} ms + build {:.0} ms + trace {:.0} ms", st.sim_ms, st.build_ms, st.render_ms));
     }

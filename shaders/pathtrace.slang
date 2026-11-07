@@ -16,7 +16,9 @@ struct Material {
     int4 tex0;           // base colour, roughness, metalness, emission texture (-1 = none)
     int4 tex1;           // normal texture, roughness channel, metalness channel, alpha mode (1 = mask)
     float4 p0;           // normal scale, alpha cutoff, uv scale x, uv scale y
-    float4 p1;           // base alpha
+    float4 p1;           // base alpha, program id, role, -
+    float4 p2;           // transmission weight, ior, transmission depth (m), -
+    float4 p3;           // transmission colour
 };
 struct Light { float4 pos_type; float4 radiance; float4 u; float4 v; }; // 0 point, 1 rect, 2 directional
 struct Frame {
@@ -164,13 +166,18 @@ static const uint MASK_CG = 0x01;
 
 bool visible(float3 o, float3 d, float tmax) { return visible_mask(o, d, tmax, MASK_ALL); }
 
+/// Shadow rays: alpha-masked texels and glass (transmission >= 0.5) let light through.
+bool shadow_blocks(uint inst_id, uint prim, float2 bc) {
+    return materials[instances[inst_id].meta.z].p2.x < 0.5 && alpha_pass(inst_id, prim, bc);
+}
+
 bool visible_mask(float3 o, float3 d, float tmax, uint mask) {
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
     RayDesc r; r.Origin = o; r.Direction = d; r.TMin = 0.0; r.TMax = tmax;
     q.TraceRayInline(tlas, RAY_FLAG_NONE, mask, r);
     while (q.Proceed()) {
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE &&
-            alpha_pass(q.CandidateInstanceID(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
+            shadow_blocks(q.CandidateInstanceID(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
             q.CommitNonOpaqueTriangleHit();
     }
     return q.CommittedStatus() == COMMITTED_NOTHING;
@@ -180,6 +187,11 @@ struct Surface {
     float3 p; float3 n; float3 ng;
     float3 base; float rough; float metal; float3 emission;
     uint emissive_index;   // index into emissive triangle list, NONE if not a light
+    float transmission;    // glass/water weight
+    float ior;
+    float3 tcolor;         // transmission colour
+    float tdepth;          // metres for tcolor (0 = thin tint per crossing)
+    bool front;            // ray arrives from the outside (shading normal side)
 };
 
 Surface make_surface(Hit h, float3 d) {
@@ -196,6 +208,7 @@ Surface make_surface(Hit h, float3 d) {
     s.p = mul(h.o2w, float4(t.p0 * w0 + t.p1 * h.bc.x + t.p2 * h.bc.y, 1));
     s.ng = normalize(mul(N, cross(e1, e2)));
     s.n = normalize(mul(N, t.n0 * w0 + t.n1 * h.bc.x + t.n2 * h.bc.y));
+    s.front = dot(s.n, d) < 0;                       // before facing: outward normals tell inside/outside
     if (dot(s.ng, d) > 0) s.ng = -s.ng;
     if (dot(s.n, s.ng) < 0) s.n = -s.n;
 
@@ -209,6 +222,10 @@ Surface make_surface(Hit h, float3 d) {
     s.metal = saturate(s.metal);
     s.emission = m.emit_metal.rgb * (m.tex0.w >= 0 ? srgb_to_linear(sample_tex(m.tex0.w, uv).rgb) : float3(1));
     s.emissive_index = inst.meta.w == NONE ? NONE : inst.meta.w + h.prim;
+    s.transmission = saturate(m.p2.x);
+    s.ior = max(m.p2.y, 1.0001);
+    s.tdepth = m.p2.z;
+    s.tcolor = m.p3.rgb;
 
     if (m.tex1.x >= 0) {   // tangent-space normal map
         float2 d1 = t.uv1 - t.uv0, d2 = t.uv2 - t.uv0;
@@ -269,6 +286,39 @@ void basis(float3 n, out float3 t, out float3 b) {
     float c = n.x * n.y * a;
     t = float3(1 + sg * n.x * n.x * a, sg * c, -sg * n.x);
     b = float3(c, sg + n.y * n.y * a, -n.y);
+}
+
+/// Unpolarised Fresnel reflectance; eta = n_incident / n_transmitted.
+float fresnel_dielectric(float cosi, float eta) {
+    float sint2 = eta * eta * (1 - cosi * cosi);
+    if (sint2 >= 1) return 1;
+    float cost = sqrt(1 - sint2);
+    float rs = (eta * cosi - cost) / (eta * cosi + cost);
+    float rp = (cosi - eta * cost) / (cosi + eta * cost);
+    return 0.5 * (rs * rs + rp * rp);
+}
+
+/// Glass/water: pick reflection or refraction by Fresnel about a (GGX-rough) microfacet.
+float3 sample_dielectric(Surface s, float3 v, inout uint rng, out bool refracted) {
+    float eta = s.front ? 1.0 / s.ior : s.ior;
+    float3 h = s.n;
+    if (s.rough > 0.03) {
+        float3 t, b; basis(s.n, t, b);
+        float a = s.rough * s.rough;
+        float u1 = rnd(rng), u2 = rnd(rng);
+        float phi = 2 * PI * u1;
+        float ct = sqrt((1 - u2) / (1 + (a * a - 1) * u2));
+        float st = sqrt(max(0, 1 - ct * ct));
+        h = normalize(t * (st * cos(phi)) + b * (st * sin(phi)) + s.n * ct);
+        if (dot(h, v) < 0) h = -h;
+    }
+    float cosi = saturate(dot(v, h));
+    refracted = false;
+    if (rnd(rng) < fresnel_dielectric(cosi, eta)) return reflect(-v, h);
+    float3 tr = refract(-v, h, eta);
+    if (dot(tr, tr) < 1e-8) return reflect(-v, h);   // total internal reflection
+    refracted = true;
+    return normalize(tr);
 }
 
 float3 sample_brdf(Surface s, float3 v, inout uint rng) {
@@ -603,7 +653,8 @@ void main(uint3 id: SV_DispatchThreadID) {
     }
 #endif
 
-    float prev_pdf = 0;       // BSDF pdf of the ray that reached this vertex (0 = camera ray)
+    float prev_pdf = 0;       // BSDF pdf of the ray that reached this vertex (0 = camera / specular)
+    float3 sigma = 0;         // absorption coefficient of the medium the ray is travelling in
     float clamp_v = F.envq.y;
     for (uint bounce = 0; bounce <= F.dims.w && any(thr > 0); bounce++) {
 #ifdef PXL_HOOK_PROPAGATE
@@ -619,6 +670,7 @@ void main(uint3 id: SV_DispatchThreadID) {
 #else
         Hit h = trace(o, d);
 #endif
+        if (h.hit && any(sigma > 0)) thr *= exp(-sigma * h.t);   // Beer-Lambert inside glass/water
         if (!h.hit) {
             float3 Le = env_radiance(d);
             if (bounce == 0) {
@@ -643,7 +695,7 @@ void main(uint3 id: SV_DispatchThreadID) {
         }
         if (bounce == 0) {
             hit_any = 1;
-            aov0 = float4(s.base, 1);
+            aov0 = float4(s.transmission >= 0.5 ? s.tcolor : s.base, 1);
             aov1 = float4(s.n, dot(s.p - F.cam_pos.xyz, F.cam_fwd.xyz));
             object_id = asuint(instances[h.inst].n0.w);
             uint role = material_role(h);
@@ -677,6 +729,20 @@ void main(uint3 id: SV_DispatchThreadID) {
             radiance += bounce > 1 ? min(c, float3(clamp_v)) : c;
         }
         if (bounce == F.dims.w) break;
+
+        if (s.transmission > 0 && rnd(rng) < s.transmission) {
+            // Glass / water: specular-like scatter, so no light sampling at this vertex.
+            bool refracted;
+            float3 l = sample_dielectric(s, v, rng, refracted);
+            if (refracted) {
+                if (s.tdepth > 0) sigma = s.front ? -log(max(s.tcolor, float3(1e-4))) / s.tdepth : float3(0);
+                else thr *= sqrt(s.tcolor);           // thin tint, split over entry and exit
+            }
+            prev_pdf = 0;
+            o = offset_ray(s.p, refracted ? -s.ng : s.ng);
+            d = l;
+            continue;
+        }
 
         float3 c = thr * direct_light(s, v, rng);
         radiance += bounce > 0 ? min(c, float3(clamp_v)) : c;

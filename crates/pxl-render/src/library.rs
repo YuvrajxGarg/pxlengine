@@ -9,8 +9,8 @@ use pxl_scene::{geometry, MaterialInputs, MeshData, Node, Scene, World};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// 96 bytes, mirrors `Material` in pathtrace.slang. Integer slots hold i32 bit patterns.
-pub type GpuMaterial = [f32; 24];
+/// 128 bytes, mirrors `Material` in pathtrace.slang. Integer slots hold i32 bit patterns.
+pub type GpuMaterial = [f32; 32];
 
 pub struct MeshEntry {
     pub data: MeshData,
@@ -60,6 +60,17 @@ pub struct MatDesc {
     pub program: u32,
     /// pxl_scene::Role code (0 surface, 1 shadow catcher, 2 holdout).
     pub role: u32,
+    pub transmission: f32,
+    pub ior: f32,
+    pub transmission_color: [f32; 3],
+    pub transmission_depth: f32,
+}
+
+impl MatDesc {
+    /// Mostly-transmissive surfaces are non-opaque in the BLAS so shadow rays can pass.
+    pub fn transmissive(&self) -> bool {
+        self.transmission >= 0.5
+    }
 }
 
 pub fn encode_material(m: &MatDesc) -> GpuMaterial {
@@ -71,7 +82,13 @@ pub fn encode_material(m: &MatDesc) -> GpuMaterial {
         i(m.normal_tex), i(m.rough_channel), i(m.metal_channel), i(m.alpha_mask as i32),
         m.normal_scale, m.alpha_cutoff, m.uv_scale[0], m.uv_scale[1],
         m.base_alpha, f32::from_bits(m.program), f32::from_bits(m.role), 0.0,
+        m.transmission, m.ior, m.transmission_depth, 0.0,
+        m.transmission_color[0], m.transmission_color[1], m.transmission_color[2], 0.0,
     ]
+}
+
+pub fn material_transmissive(m: &GpuMaterial) -> bool {
+    m[24] >= 0.5
 }
 
 pub fn material_role(m: &GpuMaterial) -> u32 {
@@ -198,6 +215,10 @@ impl Library {
             uv_scale: m.uv_scale,
             program,
             role,
+            transmission: m.transmission_weight,
+            ior: m.specular_ior,
+            transmission_color: m.transmission_color,
+            transmission_depth: m.transmission_depth,
         }))
     }
 
@@ -244,14 +265,25 @@ impl Library {
                 uv_scale: [1.0, 1.0],
                 program: 0,
                 role: 0,
+                transmission: m.transmission,
+                ior: m.ior,
+                transmission_color: m.attenuation_color,
+                transmission_depth: m.attenuation_distance,
             };
-            let opaque = !m.alpha_mask;
+            let opaque = !m.alpha_mask && !desc.transmissive();
             let mesh = self.add_mesh(format!("{}#p{pi}", path.display()), prim.mesh, opaque);
             prim_info.push((mesh, encode_material(&desc)));
         }
         let parts: Vec<_> = instances.into_iter().map(|(p, xf)| (prim_info[p].0, prim_info[p].1, xf)).collect();
         self.assets.insert(path, parts.clone());
         Ok(parts)
+    }
+
+    /// Material of a fluid surface and whether its BLAS can be opaque (not glass/water).
+    pub fn fluid_material(&mut self, f: &pxl_scene::Fluid) -> Result<(GpuMaterial, bool)> {
+        let first = f.materials.first().cloned().unwrap_or_default();
+        let m = self.material_from_inputs(&first.inputs, first.program.as_deref(), first.role.code())?;
+        Ok((m, !material_transmissive(&m)))
     }
 
     /// Mesh + material drawn for every agent of a simulation.
@@ -279,10 +311,12 @@ impl Library {
             let object = object as u32;
             match node {
                 Node::Mesh(m) => {
-                    let key = format!("{:?}", m.geometry);
+                    // Glass needs a non-opaque BLAS (shadow rays pass), so it gets its own key.
+                    let glass = m.materials.first().is_some_and(|x| x.inputs.transmission_weight >= 0.5);
+                    let key = format!("{:?}{}", m.geometry, if glass { "#glass" } else { "" });
                     let mesh = match self.mesh_keys.get(&key) {
                         Some(&i) => i,
-                        None => self.add_mesh(key, geometry::build(&m.geometry), true),
+                        None => self.add_mesh(key, geometry::build(&m.geometry), !glass),
                     };
                     let first = m.materials.first().cloned().unwrap_or_default();
                     let material = self.material_from_inputs(&first.inputs, first.program.as_deref(), first.role.code()).with_context(|| {

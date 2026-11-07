@@ -1,0 +1,14 @@
+{"version":1,"nodes":[
+  {"type":"mesh","name":"floor","geometry":{"std":"grid","size":[30,30]},
+   "materials":[{"program":"tiles"}]},
+  {"type":"mesh","name":"glass ball","translation":[-1.4,0.7,0],"geometry":{"std":"sphere","radius":0.7},
+   "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.5,"specular_roughness":0}}]},
+  {"type":"mesh","name":"frosted","translation":[0.1,0.55,-0.4],"rotation":[0,25,0],"geometry":{"std":"box","size":[1.1,1.1,1.1]},
+   "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.5,"specular_roughness":0.25,"transmission_color":[0.75,0.9,1.0],"transmission_depth":0.6}}]},
+  {"type":"mesh","name":"water","translation":[1.6,0.55,0.3],"geometry":{"std":"cylinder","radius":0.5,"height":1.1},
+   "materials":[{"inputs":{"transmission_weight":1,"specular_ior":1.33,"specular_roughness":0,"transmission_color":[0.35,0.8,0.85],"transmission_depth":0.5}}]},
+  {"type":"camera","translation":[0,1.7,5],"target":[0,0.5,0],"fov":38}
+],
+"programs":{"source":"programs/showcase.slang","params":{"marble_scale":1,"lava_glow":1,"tile_size":2.0,"aberration":0,"vignette":0,"grain":0,"fisheye_fov":180}},
+"world":{"hdri":"../assets/studio_small_09_2k.hdr","strength":0.8,"rotation":60},
+"render":{"resolution":[1280,720],"bounces":12}}
