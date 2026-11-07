@@ -37,7 +37,11 @@ Units are metres; adjust `scale` if the model is tiny or huge.
 - directional: `energy` = irradiance W/m² (sun ~3..5), direction translation→target.
 
 ## camera
-    {"type":"camera", "translation":[0,1,5], "target":[0,0,0], "fov":40}   fov = vertical, deg
+    {"type":"camera", "translation":[0,1,5], "target":[0,0,0], "fov":40,
+     "fstop":2.8, "focus_distance":?, "focus_target":[x,y,z]}
+`fov` = vertical, deg. `fstop` turns on depth of field (full-frame lens: 1.4 = very
+shallow, 4 = moderate, 16 = nearly all sharp). Focus defaults to `focus_target`, else
+`target`; `focus_distance` (m) overrides both. Animate `focus_distance` for rack focus.
 
 ## world
     {"color":[0.05,0.055,0.065], "strength":1, "hdri":"sky.hdr", "rotation":0}
@@ -46,8 +50,10 @@ background. `rotation` spins it around +Y (deg). Without `hdri`, `color` is unif
 
 ## render
     {"resolution":[640,480], "samples":?, "bounces":?, "exposure":0, "view":"agx",
-     "fps":24, "seed":0}
+     "fps":24, "seed":0, "motion_blur":0.5, "denoise":?, "transparent":false}
 `view`: "agx" (filmic, default), "aces", "standard". `exposure` in stops.
+`motion_blur` = shutter as a fraction of a frame (0.5 = 180° film look); everything
+animated blurs, including the camera. `transparent` makes the PNG background alpha 0.
 
 ## animation
     {"frame_start":0, "frame_end":47, "tracks":[

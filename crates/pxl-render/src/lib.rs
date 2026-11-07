@@ -20,12 +20,14 @@ pub struct Profile {
     pub name: &'static str,
     pub samples: u32,
     pub bounces: u32,
+    pub denoise: bool,
 }
 
-pub const PROFILES: [Profile; 3] = [
-    Profile { name: "std/previs", samples: 8, bounces: 1 },
-    Profile { name: "std/draft", samples: 64, bounces: 4 },
-    Profile { name: "std/final", samples: 256, bounces: 8 },
+pub const PROFILES: [Profile; 4] = [
+    Profile { name: "std/previs", samples: 4, bounces: 1, denoise: true },
+    Profile { name: "std/draft", samples: 16, bounces: 4, denoise: true },
+    Profile { name: "std/final", samples: 64, bounces: 8, denoise: true },
+    Profile { name: "std/path", samples: 1024, bounces: 16, denoise: false },
 ];
 
 pub fn profile(name: &str) -> Option<Profile> {
@@ -40,13 +42,26 @@ pub struct RenderOptions {
     pub seed: u32,
     /// Max radiance of indirect contributions (firefly control).
     pub clamp: f32,
+    pub denoise: bool,
 }
 
-/// Linear HDR image, RGB f32.
+/// A rendered frame: linear HDR beauty plus first-hit passes (all averaged over samples).
 pub struct Image {
     pub width: u32,
     pub height: u32,
+    /// Beauty, linear RGB.
     pub rgb: Vec<f32>,
+    /// First-hit base colour, linear RGB (background = environment colour, clamped).
+    pub albedo: Vec<f32>,
+    /// First-hit shading normal, world space, unit length (0 for background).
+    pub normal: Vec<f32>,
+    /// Distance along the camera axis to the first hit, metres (0 for background).
+    pub depth: Vec<f32>,
+    /// Geometry coverage 0..1.
+    pub alpha: Vec<f32>,
+    /// Scene node index of the first hit (u32::MAX for background), from the first sample.
+    pub object: Vec<u32>,
+    pub denoised: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -57,6 +72,8 @@ pub struct FrameStats {
     pub emissive_triangles: usize,
     pub build_ms: f64,
     pub render_ms: f64,
+    pub denoise_ms: f64,
+    pub subframes: usize,
 }
 
 fn bytes<T: Copy>(v: &[T]) -> &[u8] {
@@ -66,6 +83,7 @@ fn bytes<T: Copy>(v: &[T]) -> &[u8] {
 pub struct Renderer {
     pub ctx: Context,
     pipe: ComputePipeline,
+    denoiser: Option<std::result::Result<pxl_denoise::Denoiser, String>>,
 }
 
 /// Static (whole-render) GPU data.
@@ -85,32 +103,52 @@ impl Renderer {
         let mut ctx = Context::new()?;
         let spirv = pxl_gpu::slang::compile_compute(PATHTRACE_SRC, "main").context("compiling path tracer")?;
         let mut bindings = vec![Binding::Accel];
-        bindings.extend(std::iter::repeat(Binding::Storage).take(14));
+        bindings.extend(std::iter::repeat(Binding::Storage).take(15));
         let pipe = ctx.create_compute(&spirv, "main", &bindings, 16)?;
-        Ok(Renderer { ctx, pipe })
+        Ok(Renderer { ctx, pipe, denoiser: None })
+    }
+
+    /// Name of the denoiser device, or why it's unavailable.
+    pub fn denoiser_status(&mut self) -> String {
+        if self.denoiser.is_none() {
+            self.denoiser = Some(pxl_denoise::Denoiser::new().map_err(|e| format!("{e:#}")));
+        }
+        match self.denoiser.as_ref().unwrap() {
+            Ok(d) => format!("OIDN on {} ({})", d.device_name, d.path.display()),
+            Err(e) => e.clone(),
+        }
     }
 
     /// Render every scene in `scenes` (typically consecutive animation frames), calling `sink`
     /// with each finished image. Geometry and textures are loaded and uploaded once.
+    /// `frames[i]` holds the scene evaluated at each shutter subframe of frame i (one entry
+    /// without motion blur). Calls `sink` with each finished image. Geometry and textures are
+    /// loaded and uploaded once for the whole sequence.
     pub fn render_sequence(
         &mut self,
-        scenes: &[Scene],
+        frames: Vec<Vec<Scene>>,
         base_dir: &Path,
         opts: &RenderOptions,
         mut sink: impl FnMut(usize, Image, &FrameStats) -> Result<()>,
     ) -> Result<Vec<String>> {
         let mut lib = Library::new(base_dir);
-        let mut per_frame = Vec::with_capacity(scenes.len());
-        for s in scenes {
-            per_frame.push(lib.instances(s)?);
-            lib.load_env(&s.world)?;
+        let mut prepared: Vec<Vec<(Scene, Vec<Inst>)>> = Vec::with_capacity(frames.len());
+        for subframes in frames {
+            let mut list = Vec::with_capacity(subframes.len());
+            for s in subframes {
+                let insts = lib.instances(&s)?;
+                lib.load_env(&s.world)?;
+                list.push((s, insts));
+            }
+            prepared.push(list);
         }
         let shared = self.upload_shared(&mut lib)?;
-        for (i, (scene, insts)) in scenes.iter().zip(&per_frame).enumerate() {
-            let (img, stats) = self.render_frame(&lib, &shared, scene, insts, opts)?;
+        let mut warnings = std::mem::take(&mut lib.warnings);
+        for (i, subframes) in prepared.iter().enumerate() {
+            let (img, stats) = self.render_frame(&lib, &shared, subframes, opts, &mut warnings)?;
             sink(i, img, &stats)?;
         }
-        Ok(std::mem::take(&mut lib.warnings))
+        Ok(warnings)
     }
 
     fn upload_shared(&mut self, lib: &mut Library) -> Result<Shared> {
@@ -190,16 +228,110 @@ impl Renderer {
         Ok(Shared { vbuf, ibuf, tex_info, texels, env_pix, env_marg, env_cond, env })
     }
 
+    /// Render one frame: subframes (shutter samples for motion blur) accumulate into the same
+    /// targets, then the result is read back, split into passes, and optionally denoised.
     fn render_frame(
+        &mut self,
+        lib: &Library,
+        sh: &Shared,
+        subframes: &[(Scene, Vec<Inst>)],
+        opts: &RenderOptions,
+        warnings: &mut Vec<String>,
+    ) -> Result<(Image, FrameStats)> {
+        let [w, h] = subframes[0].0.render.resolution;
+        let pixels = w as u64 * h as u64;
+        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
+        let src = vk::BufferUsageFlags::TRANSFER_SRC;
+        let ctx = &mut self.ctx;
+        let accum = ctx.create_buffer(pixels * 16, storage | src, MemoryLocation::GpuOnly, "accum")?;
+        let aux = ctx.create_buffer(pixels * 48, storage | src, MemoryLocation::GpuOnly, "aux")?;
+        let readback = ctx.create_buffer(pixels * 64, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "readback")?;
+
+        let mut stats = FrameStats::default();
+        let k = subframes.len() as u32;
+        let mut next = 0;
+        for (i, (scene, insts)) in subframes.iter().enumerate() {
+            // Spread samples evenly over the shutter; every subframe gets at least one.
+            let n = (opts.samples / k + u32::from((i as u32) < opts.samples % k)).max(1);
+            self.render_subframe(lib, sh, scene, insts, opts, (accum, aux), next..next + n, &mut stats)?;
+            next += n;
+        }
+
+        let t1 = Instant::now();
+        let c = &self.ctx;
+        c.submit(|cmd| unsafe {
+            c.device.cmd_copy_buffer(cmd, accum.handle, readback.handle, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: pixels * 16 }]);
+            c.device.cmd_copy_buffer(cmd, aux.handle, readback.handle, &[vk::BufferCopy { src_offset: 0, dst_offset: pixels * 16, size: pixels * 48 }]);
+        })?;
+        let raw = c.read(&readback)?;
+        let data: &[f32] = unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) };
+        let np = pixels as usize;
+        let mut img = Image {
+            width: w,
+            height: h,
+            rgb: Vec::with_capacity(np * 3),
+            albedo: Vec::with_capacity(np * 3),
+            normal: Vec::with_capacity(np * 3),
+            depth: Vec::with_capacity(np),
+            alpha: Vec::with_capacity(np),
+            object: Vec::with_capacity(np),
+            denoised: false,
+        };
+        let (beauty, aovs) = data.split_at(np * 4);
+        for (px, a) in beauty.chunks_exact(4).zip(aovs.chunks_exact(12)) {
+            let inv = 1.0 / px[3].max(1.0);
+            img.rgb.extend_from_slice(&[px[0] * inv, px[1] * inv, px[2] * inv]);
+            img.albedo.extend_from_slice(&[a[0] * inv, a[1] * inv, a[2] * inv]);
+            img.alpha.push(a[3] * inv);
+            // Depth averages only over samples that hit something.
+            img.depth.push(if a[3] > 0.0 { a[7] / a[3] } else { 0.0 });
+            let n = Vec3::new(a[4], a[5], a[6]).normalize_or_zero();
+            img.normal.extend_from_slice(&n.to_array());
+            img.object.push(a[8].to_bits());
+        }
+        let ctx = &mut self.ctx;
+        for b in [accum, aux, readback] {
+            ctx.destroy_buffer(b);
+        }
+
+        if opts.denoise {
+            if self.denoiser.is_none() {
+                self.denoiser = Some(pxl_denoise::Denoiser::new().map_err(|e| format!("{e:#}")));
+            }
+            match self.denoiser.as_ref().unwrap() {
+                Ok(d) => {
+                    let q = if opts.samples >= 32 { pxl_denoise::Quality::High } else { pxl_denoise::Quality::Balanced };
+                    d.denoise(&mut img.rgb, Some(&img.albedo), Some(&img.normal), w, h, q)?;
+                    img.denoised = true;
+                }
+                Err(e) => {
+                    let msg = format!("denoiser unavailable, output is noisy: {e}");
+                    if !warnings.contains(&msg) {
+                        warnings.push(msg);
+                    }
+                }
+            }
+        }
+        stats.denoise_ms = t1.elapsed().as_secs_f64() * 1e3;
+        stats.subframes = subframes.len();
+        Ok((img, stats))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_subframe(
         &mut self,
         lib: &Library,
         sh: &Shared,
         scene: &Scene,
         insts: &[Inst],
         opts: &RenderOptions,
-    ) -> Result<(Image, FrameStats)> {
+        (accum, aux): (Buffer, Buffer),
+        samples: std::ops::Range<u32>,
+        stats: &mut FrameStats,
+    ) -> Result<()> {
         let t0 = Instant::now();
-        let mut stats = FrameStats { instances: insts.len(), ..Default::default() };
+        stats.instances = insts.len();
+        stats.triangles = 0;
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
 
         // ---- instances, materials, emissive triangles
@@ -243,6 +375,7 @@ impl Renderer {
             r[1] = mesh.index_offset;
             r[2] = i as u32;
             r[3] = emissive_offset;
+            r[7] = inst.object;
             for row in 0..3 {
                 let v = nm.row(row);
                 r[4 + row * 4] = v.x.to_bits();
@@ -348,6 +481,8 @@ impl Renderer {
         frame.extend_from_slice(bytes(&[opts.seed, emissive_count, env_w, env_h]));
         frame.extend_from_slice(bytes(&[scene.world.rotation / 360.0, env_total, p[0], p[1]]));
         frame.extend_from_slice(bytes(&[p[2], opts.clamp, 0.0, 0.0]));
+        let (aperture, focus) = cam.lens();
+        frame.extend_from_slice(bytes(&[aperture, focus, 0.0, 0.0]));
 
         // ---- upload per-frame data
         let ctx = &mut self.ctx;
@@ -363,8 +498,6 @@ impl Renderer {
         let frame_buf = ctx.create_buffer_init(&frame, storage, "frame")?;
         let tlas = ctx.build_tlas(&tlas_inst)?;
         let pixels = w as u64 * h as u64;
-        let accum = ctx.create_buffer(pixels * 16, storage | vk::BufferUsageFlags::TRANSFER_SRC, MemoryLocation::GpuOnly, "accum")?;
-        let readback = ctx.create_buffer(pixels * 16, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "readback")?;
         ctx.bind(
             &self.pipe,
             &[
@@ -383,18 +516,19 @@ impl Renderer {
                 Resource::Buffer(sh.env_marg),
                 Resource::Buffer(sh.env_cond),
                 Resource::Buffer(frame_buf),
+                Resource::Buffer(aux),
             ],
         );
-        stats.build_ms = t0.elapsed().as_secs_f64() * 1e3;
+        stats.build_ms += t0.elapsed().as_secs_f64() * 1e3;
 
         // ---- progressive samples, batched to stay well under the OS GPU watchdog
         let t1 = Instant::now();
         let groups = [w.div_ceil(8), h.div_ceil(8), 1];
         let batch = (4_000_000 / pixels.max(1)).clamp(1, 32) as u32;
         let pipe = self.pipe;
-        let mut s = 0;
-        while s < opts.samples {
-            let end = (s + batch).min(opts.samples);
+        let mut s = samples.start;
+        while s < samples.end {
+            let end = (s + batch).min(samples.end);
             let c = &*ctx;
             c.submit(|cmd| {
                 for i in s..end {
@@ -404,24 +538,11 @@ impl Renderer {
             })?;
             s = end;
         }
-        let c = &*ctx;
-        c.submit(|cmd| unsafe {
-            c.device.cmd_copy_buffer(cmd, accum.handle, readback.handle, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: pixels * 16 }]);
-        })?;
-        stats.render_ms = t1.elapsed().as_secs_f64() * 1e3;
-
-        let raw = ctx.read(&readback)?;
-        let data: &[f32] = unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) };
-        let mut rgb = Vec::with_capacity(pixels as usize * 3);
-        for px in data.chunks_exact(4).take(pixels as usize) {
-            let n = px[3].max(1.0);
-            rgb.extend_from_slice(&[px[0] / n, px[1] / n, px[2] / n]);
-        }
-
-        for b in [inst_buf, mat_buf, light_buf, em_buf, cdf_buf, frame_buf, accum, readback] {
+        stats.render_ms += t1.elapsed().as_secs_f64() * 1e3;
+        for b in [inst_buf, mat_buf, light_buf, em_buf, cdf_buf, frame_buf] {
             ctx.destroy_buffer(b);
         }
         ctx.destroy_accel(tlas);
-        Ok((Image { width: w, height: h, rgb }, stats))
+        Ok(())
     }
 }

@@ -232,6 +232,37 @@ pub struct CameraNode {
     /// Vertical field of view, degrees.
     #[serde(default = "fov")]
     pub fov: f32,
+    /// Lens f-number for depth of field (e.g. 1.4 = very shallow, 16 = deep). Omit for a pinhole.
+    #[serde(default)]
+    pub fstop: Option<f32>,
+    /// Distance to the plane in focus, metres. Defaults to the distance to `focus_target`,
+    /// else to `target`.
+    #[serde(default)]
+    pub focus_distance: Option<f32>,
+    #[serde(default)]
+    pub focus_target: Option<[f32; 3]>,
+}
+
+/// Full-frame sensor height (36x24 mm) used to turn fov + fstop into a physical aperture.
+pub const SENSOR_HEIGHT_M: f32 = 0.024;
+
+impl CameraNode {
+    /// (aperture radius m, focus distance m); radius 0 = pinhole.
+    pub fn lens(&self) -> (f32, f32) {
+        let eye = Vec3::from(self.translation);
+        let fwd = (Vec3::from(self.target) - eye).try_normalize().unwrap_or(Vec3::NEG_Z);
+        let focus = self.focus_distance.unwrap_or_else(|| {
+            let t = Vec3::from(self.focus_target.unwrap_or(self.target));
+            (t - eye).dot(fwd).max(1e-3)
+        });
+        match self.fstop {
+            Some(n) if n > 0.0 => {
+                let focal = SENSOR_HEIGHT_M * 0.5 / (self.fov.to_radians() * 0.5).tan();
+                (focal / (2.0 * n), focus)
+            }
+            _ => (0.0, focus),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -285,6 +316,15 @@ pub struct RenderSettings {
     pub seed: u32,
     #[serde(default = "fps")]
     pub fps: f32,
+    /// Shutter open time as a fraction of a frame (0.5 = 180° shutter). Omit for no motion blur.
+    #[serde(default)]
+    pub motion_blur: Option<f32>,
+    /// Run the AI denoiser (default: per profile).
+    #[serde(default)]
+    pub denoise: Option<bool>,
+    /// Transparent background in PNG output (alpha = geometry coverage).
+    #[serde(default)]
+    pub transparent: bool,
 }
 
 impl Default for RenderSettings {
@@ -320,6 +360,11 @@ impl Scene {
         }
         if !(self.render.fps > 0.0) {
             bail!("render.fps must be > 0");
+        }
+        if let Some(m) = self.render.motion_blur {
+            if !(0.0..=1.0).contains(&m) {
+                bail!("render.motion_blur is the shutter fraction of a frame, 0..1 (0.5 = 180°), got {m}");
+            }
         }
         Ok(())
     }

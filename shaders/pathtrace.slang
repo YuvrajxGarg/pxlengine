@@ -9,7 +9,7 @@
 static const float PI = 3.14159265358979;
 static const uint NONE = 0xffffffffu;
 
-struct Instance { uint4 meta; float4 n0; float4 n1; float4 n2; };   // vertexOffset, indexOffset, material, emissiveOffset
+struct Instance { uint4 meta; float4 n0; float4 n1; float4 n2; };   // vertexOffset, indexOffset, material, emissiveOffset; n0.w = object id
 struct Material {
     float4 base_rough;   // base colour rgb, roughness
     float4 emit_metal;   // emission rgb (pre-scaled), metalness
@@ -29,6 +29,7 @@ struct Frame {
     uint4 misc;          // seed, emissive triangle count, env width, env height
     float4 envp;         // env rotation (turns), env weight total, P(analytic), P(emissive)
     float4 envq;         // P(env), indirect clamp
+    float4 lens;         // aperture radius (m), focus distance (m)
 };
 struct Push { uint sample_index; uint p0; uint p1; uint p2; };
 
@@ -47,6 +48,7 @@ struct Push { uint sample_index; uint p0; uint p1; uint p2; };
 [[vk::binding(12, 0)]] StructuredBuffer<float> env_marg;      // height + 1
 [[vk::binding(13, 0)]] StructuredBuffer<float> env_cond;      // height * (width + 1)
 [[vk::binding(14, 0)]] StructuredBuffer<Frame> frames;
+[[vk::binding(15, 0)]] RWStructuredBuffer<float4> aux;         // 3 per pixel: (albedo, alpha) (normal, depth) (object id)
 [[vk::push_constant]] ConstantBuffer<Push> pc;
 
 static Frame F;
@@ -424,6 +426,14 @@ void main(uint3 id: SV_DispatchThreadID) {
     float2 uv = (float2(id.xy) + float2(rnd(rng), rnd(rng))) / float2(F.dims.xy) * 2 - 1;
     float3 o = F.cam_pos.xyz;
     float3 d = normalize(F.cam_fwd.xyz + uv.x * F.cam_right.xyz - uv.y * F.cam_up.xyz);
+    if (F.lens.x > 0) {                               // thin lens: sample the aperture, aim at the focal plane
+        float3 focus = o + d * (F.lens.y / dot(d, F.cam_fwd.xyz));
+        float r = F.lens.x * sqrt(rnd(rng)), a = 2 * PI * rnd(rng);
+        o += normalize(F.cam_right.xyz) * (r * cos(a)) + normalize(F.cam_up.xyz) * (r * sin(a));
+        d = normalize(focus - o);
+    }
+    float4 aov0 = float4(0), aov1 = float4(0);
+    uint object_id = NONE;
 
     float3 radiance = 0, thr = 1;
     float prev_pdf = 0;       // BSDF pdf of the ray that reached this vertex (0 = camera ray)
@@ -432,6 +442,7 @@ void main(uint3 id: SV_DispatchThreadID) {
         Hit h = trace(o, d);
         if (!h.hit) {
             float3 Le = env_radiance(d);
+            if (bounce == 0) aov0 = float4(saturate(Le), 0);
             float w = (prev_pdf > 0 && has_env() && F.envq.x > 0) ? mis(prev_pdf, F.envq.x * env_pdf(d)) : 1.0;
             float3 c = thr * Le * w;
             radiance += bounce > 1 ? min(c, float3(clamp_v)) : c;
@@ -439,6 +450,11 @@ void main(uint3 id: SV_DispatchThreadID) {
         }
         Surface s = make_surface(h, d);
         float3 v = -d;
+        if (bounce == 0) {
+            aov0 = float4(s.base, 1);
+            aov1 = float4(s.n, dot(s.p - F.cam_pos.xyz, F.cam_fwd.xyz));
+            object_id = asuint(instances[h.inst].n0.w);
+        }
 
         if (any(s.emission > 0)) {
             float w = 1;
@@ -467,6 +483,9 @@ void main(uint3 id: SV_DispatchThreadID) {
         d = l;
     }
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = 0;
-    float4 prev = pc.sample_index == 0 ? float4(0) : accum[idx];
-    accum[idx] = prev + float4(radiance, 1);
+    bool first = pc.sample_index == 0;
+    accum[idx] = (first ? float4(0) : accum[idx]) + float4(radiance, 1);
+    aux[idx * 3] = (first ? float4(0) : aux[idx * 3]) + aov0;
+    aux[idx * 3 + 1] = (first ? float4(0) : aux[idx * 3 + 1]) + aov1;
+    if (first) aux[idx * 3 + 2] = float4(asfloat(object_id), 0, 0, 0);
 }

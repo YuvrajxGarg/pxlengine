@@ -4,3 +4,4 @@
 !docs/images/*.png
 /out
 /assets
+/vendor

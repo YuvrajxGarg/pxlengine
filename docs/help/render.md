@@ -1,31 +1,37 @@
 # Rendering
 
-    pxl render <scene.json> --out <output> [--profile P] [--set key=value ...]
+    pxl render <scene.json> --out <output> [--profile P] [--passes LIST] [--set key=value ...]
                             [--frame N | --frame-start A --frame-end B]
 
 Outputs (chosen by the --out name):
-- `still.png`           one frame (frame_start of the animation, or `--frame N`)
-- `frames/f_####.png`   numbered sequence; `#` run = zero-padded frame number
-- `clip.mp4`            H.264 via ffmpeg (NVENC when available, else x264)
-- `clip.mov`            ProRes 422 HQ via ffmpeg
+- `still.png`             one frame, display-ready (view transform applied)
+- `still.exr`             one frame, scene-linear float RGBA (alpha = coverage), for compositing
+- `frames/f_####.png|exr` numbered sequence; `#` run = zero-padded frame number
+- `clip.mp4` / `clip.mov` H.264 (NVENC when available) / ProRes 422 HQ via ffmpeg
 Sequences and video use the scene's `animation` range unless --frame-start/--frame-end
-are given (both inclusive: 0..47 = 48 frames). Geometry and textures load once.
+are given (inclusive: 0..47 = 48 frames). Geometry and textures load once.
 
-Profiles (GPU path tracing with hardware ray queries):
+Profiles (GPU path tracing with hardware ray queries; AI denoiser = Intel OIDN):
 
-| profile    | samples | bounces | use |
-|------------|---------|---------|-----|
-| std/previs | 8       | 1       | framing, blocking, animation timing |
-| std/draft  | 64      | 4       | default; judge materials and light |
-| std/final  | 256     | 8       | delivery |
+| profile    | samples | bounces | denoise | use |
+|------------|---------|---------|---------|-----|
+| std/previs | 4       | 1       | yes     | framing, blocking, timing |
+| std/draft  | 16      | 4       | yes     | default; judge materials and light |
+| std/final  | 64      | 8       | yes     | delivery |
+| std/path   | 1024    | 16      | no      | ground-truth reference, very fine detail |
 
-`--set` keys: `samples=N`, `bounces=N`, `seed=N`, `exposure=EV`, `clamp=X` (max
-indirect radiance, default 32; lower = fewer fireflies, slightly darker glossy bounces).
-Noise falls with sqrt(samples): 4x samples = half the noise. No denoiser yet.
+Denoising can smooth fine texture or grain; compare against std/path or raise samples
+(`--set samples=256`) when detail matters. `--set denoise=false` shows raw samples.
 
-Lighting is sampled from analytic lights, glowing triangles, and the HDRI together
-(multiple importance sampling), so small bright sources stay clean.
+`--set` keys: `samples=N`, `bounces=N`, `seed=N`, `exposure=EV`, `denoise=true|false`,
+`motion_blur=SHUTTER` (0..1), `clamp=X` (max indirect radiance, default 32).
+
+`--passes albedo,normal,depth,alpha,object` (or `all`) writes extra files beside the
+output: `shot.png` -> `shot.albedo.png`, `shot.depth.exr` (metres along the camera axis,
+always EXR), `shot.object.png` (one flat colour per scene node: a matte for each object).
+With EXR output every pass is EXR. With video, passes are numbered files beside the clip.
 
 Environment: `PXL_DEVICE=<name substring>` picks a GPU, `PXL_VALIDATION=1` enables
-Vulkan validation, `PXL_SLANGC` / `PXL_FFMPEG` point at tools, `PXL_CACHE_DIR` moves
-the shader cache. `pxl info` shows what was found.
+Vulkan validation, `PXL_SLANGC` / `PXL_FFMPEG` point at tools, `PXL_OIDN_DIR` at the
+denoiser, `PXL_OIDN_DEVICE=cpu|cuda` forces its device, `PXL_CACHE_DIR` moves the
+shader cache. `pxl info` shows what was found.

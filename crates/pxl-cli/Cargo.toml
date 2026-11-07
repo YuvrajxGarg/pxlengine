@@ -11,6 +11,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 png.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "exr"] }
 serde_json.workspace = true
 pxl-scene = { path = "../pxl-scene" }
 pxl-gpu = { path = "../pxl-gpu" }

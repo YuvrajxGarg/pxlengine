@@ -25,6 +25,7 @@ cargo build --release
 
 - `crates/pxl-scene` — scene JSON schema, std geometry, animation tracks
 - `crates/pxl-assets` — glTF 2.0, texture and HDRI loading
+- `crates/pxl-denoise` — Intel OIDN, loaded at runtime
 - `crates/pxl-gpu` — Vulkan device, buffers, BLAS/TLAS, compute pipelines, Slang compiler cache
 - `crates/pxl-render` — scene → GPU, progressive path tracing
 - `crates/pxl-cli` — the `pxl` binary
@@ -32,5 +33,7 @@ cargo build --release
 - `docs/help/` — agent-facing help topics (embedded)
 - `docs/ROADMAP.md` — phased plan and known gaps
 
-Status: phases 1-2 complete (GPU path tracer; glTF/texture/HDRI import, animation, MP4).
+Status: phases 1-3 complete (GPU path tracer; glTF/texture/HDRI import, animation, video;
+OIDN denoising, depth of field, motion blur, compositing passes, EXR).
 See the roadmap. Test assets: `sh scripts/fetch-test-assets.sh` (Khronos + Poly Haven).
+Denoiser: `sh scripts/fetch-oidn.sh` (Intel Open Image Denoise into `vendor/oidn`).

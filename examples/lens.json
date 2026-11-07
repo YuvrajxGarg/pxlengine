@@ -1,0 +1,21 @@
+{"version":1,"nodes":[
+  {"type":"asset","name":"helmet","file":"../assets/DamagedHelmet.glb","translation":[0,0.9,0],"rotation":[0,-20,0],"scale":[0.8,0.8,0.8]},
+  {"type":"mesh","name":"floor","geometry":{"std":"grid","size":[40,40]},
+   "materials":[{"inputs":{"base_color":[0.1,0.1,0.11],"specular_roughness":0.3}}]},
+  {"type":"mesh","name":"near ball","translation":[-0.9,0.25,2.2],"geometry":{"std":"sphere","radius":0.25},
+   "materials":[{"inputs":{"base_color":[0.8,0.15,0.1],"specular_roughness":0.2}}]},
+  {"type":"mesh","name":"far ball 1","translation":[1.3,0.4,-3],"geometry":{"std":"sphere","radius":0.4},
+   "materials":[{"inputs":{"base_color":[0.1,0.4,0.8],"specular_roughness":0.2}}]},
+  {"type":"mesh","name":"far ball 2","translation":[-1.8,0.4,-5],"geometry":{"std":"sphere","radius":0.4},
+   "materials":[{"inputs":{"base_color":[0.9,0.7,0.1],"base_metalness":1,"specular_roughness":0.15}}]},
+  {"type":"mesh","name":"lamp","translation":[2.5,1.2,-7],"geometry":{"std":"sphere","radius":0.15},
+   "materials":[{"inputs":{"base_color":[0,0,0],"emission_color":[1,0.6,0.3],"emission_luminance":80}}]},
+  {"type":"mesh","name":"runner","translation":[-2,0.2,0.8],"geometry":{"std":"sphere","radius":0.2},
+   "materials":[{"inputs":{"base_color":[0.9,0.9,0.9],"specular_roughness":0.1,"base_metalness":1}}]},
+  {"type":"camera","name":"cam","translation":[0.3,1.1,3.6],"target":[0,0.9,0],"fov":30,"fstop":1.4}
+],
+"world":{"hdri":"../assets/studio_small_09_2k.hdr","strength":0.5,"rotation":200},
+"render":{"resolution":[960,540],"motion_blur":0.5},
+"animation":{"frame_end":24,"tracks":[
+  {"node":"runner","path":"translation","keys":[[0,[-2.5,0.2,0.8]],[24,[2.5,0.2,0.8]]]}
+]}}

@@ -5,6 +5,7 @@ Write a scene as JSON, render it, look at the image, revise. No editor.
     pxl render shot.json --profile std/previs --out preview.png   # fast look
     pxl render shot.json --profile std/final  --out final.png     # delivery
     pxl render shot.json --profile std/draft  --out clip.mp4      # animation -> video
+    pxl render shot.json --out plate.exr --passes all            # compositing: EXR + mattes
     pxl help scene    # every node type and field
     pxl help render   # profiles, --set overrides, output
     pxl info          # which GPU is used

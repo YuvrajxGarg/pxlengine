@@ -20,13 +20,17 @@ enum Cmd {
     /// Render a scene JSON to an image, image sequence, or video.
     Render {
         scene: PathBuf,
-        /// Output: still.png, frames_####.png (sequence) or clip.mp4.
+        /// Output: still.png / still.exr, frames_####.png|exr (sequence), clip.mp4 / clip.mov.
         #[arg(long, short)]
         out: PathBuf,
-        /// Quality profile: std/previs, std/draft, std/final.
+        /// Quality profile: std/previs, std/draft, std/final, std/path.
         #[arg(long, default_value = "std/draft")]
         profile: String,
-        /// Override settings: samples=N, bounces=N, seed=N, exposure=EV, clamp=X.
+        /// Extra pass files beside the output: albedo,normal,depth,alpha,object or all.
+        #[arg(long)]
+        passes: Option<String>,
+        /// Override settings: samples=N, bounces=N, seed=N, exposure=EV, clamp=X, denoise=BOOL,
+        /// motion_blur=SHUTTER.
         #[arg(long = "set", value_name = "KEY=VALUE")]
         set: Vec<String>,
         /// Render a single frame of an animated scene.
@@ -65,19 +69,25 @@ fn run() -> Result<()> {
             println!("vulkan:  {}", ctx.info.api_version);
             println!("slangc:  {}", pxl_gpu::slang::find_slangc().map(|p| p.display().to_string()).unwrap_or_else(|e| e.to_string()));
             println!("ffmpeg:  {}", output::ffmpeg_status());
+            drop(ctx);
+            let mut r = Renderer::new()?;
+            println!("denoise: {}", r.denoiser_status());
             println!("cache:   {}", pxl_gpu::slang::cache_dir().display());
             Ok(())
         }
-        Cmd::Render { scene, out, profile: prof, set, frame, frame_start, frame_end } => {
-            render(&scene, &out, &prof, &set, frame, frame_start, frame_end)
+        Cmd::Render { scene, out, profile: prof, passes, set, frame, frame_start, frame_end } => {
+            let passes = passes.as_deref().map(output::Pass::parse_list).transpose()?.unwrap_or_default();
+            render(&scene, &out, &prof, passes, &set, frame, frame_start, frame_end)
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     scene_path: &Path,
     out: &Path,
     prof: &str,
+    passes: Vec<output::Pass>,
     set: &[String],
     frame: Option<f64>,
     frame_start: Option<i32>,
@@ -93,8 +103,10 @@ fn render(
         bounces: scene.render.bounces.unwrap_or(p.bounces),
         seed: scene.render.seed,
         clamp: 32.0,
+        denoise: scene.render.denoise.unwrap_or(p.denoise),
     };
     let mut exposure = None;
+    let mut motion_blur = scene.render.motion_blur;
     for kv in set {
         let (k, v) = kv.split_once('=').with_context(|| format!("--set expects KEY=VALUE, got '{kv}'"))?;
         let bad = || format!("--set {k}: cannot parse '{v}'");
@@ -104,7 +116,9 @@ fn render(
             "seed" => opts.seed = v.parse().with_context(bad)?,
             "exposure" => exposure = Some(v.parse::<f32>().with_context(bad)?),
             "clamp" => opts.clamp = v.parse().with_context(bad)?,
-            _ => bail!("unknown --set key '{k}' (samples, bounces, seed, exposure, clamp)"),
+            "denoise" => opts.denoise = v.parse().with_context(bad)?,
+            "motion_blur" => motion_blur = Some(v.parse::<f32>().with_context(bad)?.clamp(0.0, 1.0)),
+            _ => bail!("unknown --set key '{k}' (samples, bounces, seed, exposure, clamp, denoise, motion_blur)"),
         }
     }
 
@@ -132,42 +146,81 @@ fn render(
         );
     }
 
-    let scenes: Vec<Scene> = frames
-        .iter()
-        .map(|&f| scene.at_frame(f))
-        .collect::<Result<_>>()?;
-    let base_dir = scene_path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let [w, h] = scenes[0].render.resolution;
-    if scenes.iter().any(|s| s.render.resolution != [w, h]) {
+    // Motion blur: evaluate the scene at several instants across the open shutter (centred on
+    // the frame); samples are spread across them, so moving objects and cameras smear.
+    let shutter = motion_blur.filter(|s| *s > 0.0);
+    let subframe_count = if shutter.is_some() { opts.samples.clamp(1, 16) } else { 1 };
+    let mut frame_scenes: Vec<Vec<Scene>> = Vec::with_capacity(frames.len());
+    for &f in &frames {
+        let mut subs = Vec::with_capacity(subframe_count as usize);
+        for k in 0..subframe_count {
+            let t = match shutter {
+                Some(sh) => f + ((k as f64 + 0.5) / subframe_count as f64 - 0.5) * sh as f64,
+                None => f,
+            };
+            subs.push(scene.at_frame(t)?);
+        }
+        frame_scenes.push(subs);
+    }
+    let first = frame_scenes[0][0].clone();
+    let [w, h] = first.render.resolution;
+    if frame_scenes.iter().flatten().any(|s| s.render.resolution != [w, h]) {
         bail!("render.resolution cannot be animated");
     }
+    let films: Vec<output::Film> = frame_scenes
+        .iter()
+        .map(|subs| output::Film {
+            exposure: exposure.unwrap_or(subs[0].render.exposure),
+            view: subs[0].render.view,
+            transparent: subs[0].render.transparent,
+        })
+        .collect();
+    let base_dir = scene_path.parent().map(Path::to_path_buf).unwrap_or_default();
 
     let mut renderer = Renderer::new()?;
     let device = renderer.ctx.info.name.clone();
-    let mut sink = output::Sink::open(kind, out, w, h, scenes[0].render.fps)?;
-    let total = scenes.len();
+    let mut sink = output::Sink::open(kind, out, w, h, first.render.fps, passes)?;
+    let total = frames.len();
     let multi = total > 1;
     let mut last_stats = None;
-    let warnings = renderer.render_sequence(&scenes, &base_dir, &opts, |i, img, st| {
-        let s = &scenes[i];
-        let rgb = pxl_render::film::to_rgb8(&img, exposure.unwrap_or(s.render.exposure), s.render.view);
-        sink.write(frames[i] as i64, &rgb)?;
+    let mut denoised = false;
+    let warnings = renderer.render_sequence(frame_scenes, &base_dir, &opts, |i, img, st| {
+        sink.write(frames[i] as i64, &img, &films[i])?;
+        denoised = img.denoised;
         if multi {
-            eprintln!("frame {} ({}/{total}) {:.0} ms", frames[i], i + 1, st.build_ms + st.render_ms);
+            eprintln!("frame {} ({}/{total}) {:.0} ms", frames[i], i + 1, st.build_ms + st.render_ms + st.denoise_ms);
         }
         last_stats = Some(st.clone());
         Ok(())
     })?;
+    let written = std::mem::take(&mut sink.written);
     sink.finish()?;
     for w in &warnings {
         eprintln!("warning: {w}");
     }
     let st = last_stats.unwrap_or_default();
+    let mut extras = Vec::new();
+    if denoised {
+        extras.push("denoised".to_string());
+    }
+    if let Some(sh) = shutter {
+        extras.push(format!("motion blur {sh} x{subframe_count}"));
+    }
+    if first.camera().lens().0 > 0.0 {
+        extras.push(format!("f/{}", first.camera().fstop.unwrap_or(0.0)));
+    }
     eprintln!(
-        "{} {w}x{h} | {} frame(s) | {} spp, {} bounces | {} tris, {} instances, {} lights, {} emissive tris | {:.2} s total | {device}",
-        p.name, total, opts.samples, opts.bounces, st.triangles, st.instances, st.lights, st.emissive_triangles,
+        "{} {w}x{h} | {} frame(s) | {} spp, {} bounces{} | {} tris, {} instances, {} lights, {} emissive tris | {:.2} s total | {device}",
+        p.name, total, opts.samples, opts.bounces,
+        if extras.is_empty() { String::new() } else { format!(", {}", extras.join(", ")) },
+        st.triangles, st.instances, st.lights, st.emissive_triangles,
         t0.elapsed().as_secs_f64()
     );
-    println!("{}", out.display());
+    if kind.format == output::Format::Video {
+        println!("{}", out.display());
+    }
+    for p in &written {
+        println!("{}", p.display());
+    }
     Ok(())
 }

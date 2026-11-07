@@ -22,6 +22,8 @@ pub struct MeshEntry {
 
 #[derive(Clone)]
 pub struct Inst {
+    /// Index of the scene node this instance came from (object id pass).
+    pub object: u32,
     pub mesh: usize,
     pub material: GpuMaterial,
     pub xform: Mat4,
@@ -234,7 +236,8 @@ impl Library {
     /// Resolve every renderable node of `scene` into instances, loading what is new.
     pub fn instances(&mut self, scene: &Scene) -> Result<Vec<Inst>> {
         let mut out = Vec::new();
-        for node in &scene.nodes {
+        for (object, node) in scene.nodes.iter().enumerate() {
+            let object = object as u32;
             match node {
                 Node::Mesh(m) => {
                     let key = format!("{:?}", m.geometry);
@@ -246,12 +249,12 @@ impl Library {
                     let material = self.material_from_inputs(&inputs).with_context(|| {
                         format!("material of mesh '{}'", m.name.as_deref().unwrap_or("unnamed"))
                     })?;
-                    out.push(Inst { mesh, material, xform: m.transform() });
+                    out.push(Inst { object, mesh, material, xform: m.transform() });
                 }
                 Node::Asset(a) => {
                     let base = a.transform();
                     for (mesh, material, local) in self.asset(&a.file)? {
-                        out.push(Inst { mesh, material, xform: base * local });
+                        out.push(Inst { object, mesh, material, xform: base * local });
                     }
                 }
                 Node::Light(_) | Node::Camera(_) => {}

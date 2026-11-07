@@ -36,9 +36,15 @@ There is no editor.
       normal maps, AgX tone mapping, PNG sequences / MP4 (NVENC) / MOV (ProRes).
       Known gaps: alpha BLEND is treated as MASK; no transmission/glass; rectangle lights are
       invisible to camera and mirrors; no denoiser (phase 3).
-- [ ] **3. Hybrid renderer + profiles** – raster G-buffer visibility + ray-query lighting
-      (`std/previs`, `std/draft`, `std/final`) and full path transport (`std/path`); OIDN denoise;
-      depth of field, motion blur; AOV/control passes (depth, normal, albedo, mattes).
+- [x] **3. Denoise, lens, passes** (done 2026-11-07) – Intel OIDN 2.5.1 loaded at runtime (CUDA on
+      NVIDIA, CPU fallback) guided by albedo + normal; profiles previs/draft/final (4/16/64 spp,
+      denoised) and `std/path` (1024 spp reference); thin-lens depth of field (f-stop, focus
+      distance/target); shutter motion blur by subframe accumulation (up to 16 instants);
+      passes albedo/normal/depth/alpha/object; EXR output; transparent PNG.
+      Decision: no raster G-buffer path — the ray-query previs already renders in ~5–10 ms, so a
+      raster pipeline would add complexity without a speed win on RT hardware.
+      Known gaps: motion blur rebuilds the scene per subframe (~200 ms/frame at 16 instants);
+      object-id comes from the first sample (aliased edges); denoiser can soften fine grain.
 - [ ] **4. Program hooks** – scene-supplied Slang for camera rays, material response, light
       propagation (e.g. Schwarzschild black hole), film response. Slang interfaces + module linking.
 - [ ] **5. Simulation programs** – Slang compute stages owned by the scene: particles / agents

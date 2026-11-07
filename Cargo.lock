@@ -905,11 +905,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "image",
  "png 0.17.16",
  "pxl-gpu",
  "pxl-render",
  "pxl-scene",
  "serde_json",
+]
+
+[[package]]
+name = "pxl-denoise"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libloading",
 ]
 
 [[package]]
@@ -930,6 +939,7 @@ dependencies = [
  "glam",
  "gpu-allocator",
  "pxl-assets",
+ "pxl-denoise",
  "pxl-gpu",
  "pxl-scene",
 ]

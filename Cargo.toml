@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pxl-scene", "crates/pxl-assets", "crates/pxl-gpu", "crates/pxl-render", "crates/pxl-cli"]
+members = ["crates/pxl-scene", "crates/pxl-assets", "crates/pxl-denoise", "crates/pxl-gpu", "crates/pxl-render", "crates/pxl-cli"]
 
 [workspace.package]
 version = "0.1.0"
