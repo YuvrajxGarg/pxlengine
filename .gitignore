@@ -1,0 +1,5 @@
+/target
+*.png
+*.mp4
+!docs/images/*.png
+/out

@@ -1,0 +1,17 @@
+[package]
+name = "pxl-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "pxl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+png.workspace = true
+serde_json.workspace = true
+pxl-scene = { path = "../pxl-scene" }
+pxl-gpu = { path = "../pxl-gpu" }
+pxl-render = { path = "../pxl-render" }

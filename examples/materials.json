@@ -1,0 +1,18 @@
+{"version":1,"nodes":[
+  {"type":"mesh","name":"floor","geometry":{"std":"grid","size":[30,30]},
+   "materials":[{"inputs":{"base_color":[0.18,0.18,0.2],"specular_roughness":0.25}}]},
+  {"type":"mesh","name":"gold","translation":[-2.4,0.8,0],"geometry":{"std":"sphere","radius":0.8},
+   "materials":[{"inputs":{"base_color":[1.0,0.76,0.33],"base_metalness":1,"specular_roughness":0.15}}]},
+  {"type":"mesh","name":"chrome torus","translation":[0,0.75,0],"rotation":[70,0,20],
+   "geometry":{"std":"torus","radius":0.6,"tube":0.2},
+   "materials":[{"inputs":{"base_color":[0.95,0.95,0.97],"base_metalness":1,"specular_roughness":0.05}}]},
+  {"type":"mesh","name":"clay box","translation":[2.3,0.6,0.2],"rotation":[0,30,0],
+   "geometry":{"std":"box","size":[1.2,1.2,1.2]},
+   "materials":[{"inputs":{"base_color":[0.75,0.3,0.22],"specular_roughness":0.7}}]},
+  {"type":"mesh","name":"neon pillar","translation":[0,1.5,-2.5],"geometry":{"std":"cylinder","radius":0.12,"height":3},
+   "materials":[{"inputs":{"base_color":[0,0,0],"emission_color":[0.2,0.9,1.0],"emission_luminance":25}}]},
+  {"type":"light","shape":"rectangle","translation":[3,6,4],"target":[0,0,0],"energy":900,"size":[3,2]},
+  {"type":"light","shape":"directional","translation":[-4,6,-6],"target":[0,0,0],"energy":0.6,"color":[0.6,0.7,1.0]},
+  {"type":"camera","translation":[0,2.4,7.5],"target":[0,0.7,0],"fov":35}
+],"world":{"color":[0.02,0.025,0.035]},
+"render":{"resolution":[960,540]}}

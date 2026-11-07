@@ -1,0 +1,12 @@
+[package]
+name = "pxl-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ash.workspace = true
+glam.workspace = true
+gpu-allocator.workspace = true
+pxl-scene = { path = "../pxl-scene" }
+pxl-gpu = { path = "../pxl-gpu" }
