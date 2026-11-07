@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(numbered(Path::new("x#.png"), 12), PathBuf::from("x12.png"));
         assert_eq!(pass_path(Path::new("out/shot.png"), Pass::Depth, Format::Png), PathBuf::from("out/shot.depth.exr"));
         assert_eq!(pass_path(Path::new("out/f_0003.png"), Pass::Normal, Format::Png), PathBuf::from("out/f_0003.normal.png"));
-        assert_eq!(Pass::parse_list("depth, all").unwrap().len(), 5);
+        assert_eq!(Pass::parse_list("depth, all").unwrap().len(), 6);
         assert!(Pass::parse_list("dpeth").is_err());
     }
 }
