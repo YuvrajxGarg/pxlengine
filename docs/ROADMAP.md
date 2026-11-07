@@ -30,10 +30,12 @@ There is no editor.
 - [x] **1. Core path tracer** (done 2026-11-07; 640x480 @ 256 spp ≈ 35 ms on RTX 4080 Laptop) – Vulkan device with ray query, BLAS/TLAS for std primitives
       (sphere, grid, box), OpenPBR-named material inputs, point/rectangle/directional lights,
       look-at camera, progressive path tracing in a Slang compute shader, PNG out, `pxl help`.
-- [ ] **2. Assets + animation + video** – glTF import (meshes, PBR textures), keyframed
+- [x] **2. Assets + animation + video** (done 2026-11-07; 72-frame 960x540 draft MP4 in 4.4 s) – glTF import (meshes, PBR textures), keyframed
       animation tracks on any node field, frame ranges, MP4 via ffmpeg, emissive meshes as lights
-      (NEE on emissive triangles — today they are only found by BSDF bounces, so they're noisy),
-      HDRI environment maps, AgX tone mapping.
+      (NEE + MIS, texture-weighted), importance-sampled HDRI environments, alpha-mask cut-outs,
+      normal maps, AgX tone mapping, PNG sequences / MP4 (NVENC) / MOV (ProRes).
+      Known gaps: alpha BLEND is treated as MASK; no transmission/glass; rectangle lights are
+      invisible to camera and mirrors; no denoiser (phase 3).
 - [ ] **3. Hybrid renderer + profiles** – raster G-buffer visibility + ray-query lighting
       (`std/previs`, `std/draft`, `std/final`) and full path transport (`std/path`); OIDN denoise;
       depth of field, motion blur; AOV/control passes (depth, normal, albedo, mattes).

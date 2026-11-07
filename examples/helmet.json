@@ -1,0 +1,8 @@
+{"version":1,"nodes":[
+  {"type":"asset","name":"helmet","file":"../assets/DamagedHelmet.glb","translation":[0,1,0],"rotation":[0,-25,0]},
+  {"type":"mesh","name":"floor","geometry":{"std":"grid","size":[20,20]},
+   "materials":[{"inputs":{"base_color":[0.08,0.08,0.09],"specular_roughness":0.35}}]},
+  {"type":"camera","name":"cam","translation":[0.6,1.4,3.6],"target":[0,1.0,0],"fov":35}
+],
+"world":{"hdri":"../assets/studio_small_09_2k.hdr","strength":1.0,"rotation":40},
+"render":{"resolution":[960,720]}}

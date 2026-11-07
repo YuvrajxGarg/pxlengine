@@ -1,12 +1,14 @@
 # Scene reference (version 1)
 
-    {"version":1, "nodes":[...], "world":{...}, "render":{...}}
+    {"version":1, "nodes":[...], "world":{...}, "render":{...}, "animation":{...}}
+
+Every node may have a `"name"` (needed to animate it). Paths are relative to the scene file.
 
 ## mesh
-    {"type":"mesh", "name":?, "translation":[0,0,0], "rotation":[0,0,0] (Euler XYZ deg),
+    {"type":"mesh", "translation":[0,0,0], "rotation":[0,0,0] (Euler XYZ deg),
      "scale":[1,1,1], "geometry":{...}, "materials":[{"inputs":{...}}]}
 
-geometry (`std` selects the generator):
+geometry (`std` selects the generator; all have UVs):
 - `{"std":"sphere","radius":1,"segments":64}`
 - `{"std":"grid","size":[w,d]}`        flat, XZ plane, faces +Y (alias "plane")
 - `{"std":"box","size":[x,y,z]}`
@@ -14,28 +16,48 @@ geometry (`std` selects the generator):
 - `{"std":"torus","radius":1,"tube":0.25,"segments":64}`     XZ plane
 
 material inputs (OpenPBR names, defaults shown):
-- `base_color` [0.8,0.8,0.8]       albedo, keep <= ~0.9
-- `specular_roughness` 0.5         0 mirror .. 1 matte
-- `base_metalness` 0               1 = metal (base_color tints reflections)
-- `emission_color` [1,1,1], `emission_luminance` 0   glowing surfaces (try 5..50)
+- `base_color` [0.8,0.8,0.8]  ·  `base_color_texture` "albedo.jpg" (sRGB, multiplies)
+- `specular_roughness` 0.5 (0 mirror .. 1 matte)  ·  `specular_roughness_texture` (red channel)
+- `base_metalness` 0 (1 = metal)  ·  `base_metalness_texture` (red channel)
+- `emission_color` [1,1,1], `emission_luminance` 0 (glow; try 5..50)  ·  `emission_color_texture`
+- `normal_texture` (OpenGL/+Y, e.g. Poly Haven `nor_gl`), `normal_scale` 1
+- `uv_scale` [1,1]   texture tiling (e.g. [8,8] on a 10 m grid)
+Glowing meshes are real light sources (they light and shadow the scene).
+
+## asset (glTF 2.0)
+    {"type":"asset", "file":"model.glb", "translation":[..], "rotation":[..], "scale":[..]}
+Imports every mesh with its PBR materials: base colour, metal/roughness, normal,
+emissive (+ KHR_materials_emissive_strength) textures, alpha MASK cut-outs.
+Units are metres; adjust `scale` if the model is tiny or huge.
 
 ## light
     {"type":"light", "shape":"point"|"rectangle"|"directional",
      "translation":[x,y,z], "target":[0,0,0], "energy":100, "color":[1,1,1], "size":1}
-- point: `energy` watts, emits in all directions.
-- rectangle: `energy` watts over the area, one-sided, faces `target`;
-  `size` = metres, number or [w,h]. Soft shadows grow with size.
-- directional: `energy` = irradiance W/m² (sun ~3..5), shines from
-  `translation` toward `target`; only the direction matters.
+- point: `energy` watts. rectangle: watts, one-sided toward `target`, `size` m or [w,h].
+- directional: `energy` = irradiance W/m² (sun ~3..5), direction translation→target.
 
 ## camera
-    {"type":"camera", "translation":[0,1,5], "target":[0,0,0], "fov":40}
-`fov` = vertical field of view in degrees.
+    {"type":"camera", "translation":[0,1,5], "target":[0,0,0], "fov":40}   fov = vertical, deg
 
 ## world
-    {"color":[0.05,0.055,0.065], "strength":1}
-Uniform environment light for rays that leave the scene; also the background.
+    {"color":[0.05,0.055,0.065], "strength":1, "hdri":"sky.hdr", "rotation":0}
+`hdri` = equirectangular .hdr/.exr (e.g. Poly Haven); lights the scene and is the
+background. `rotation` spins it around +Y (deg). Without `hdri`, `color` is uniform.
 
 ## render
-    {"resolution":[640,480], "samples":?, "bounces":?, "exposure":0, "seed":0}
-`samples`/`bounces` override the profile. `exposure` in stops (+1 = 2x brighter).
+    {"resolution":[640,480], "samples":?, "bounces":?, "exposure":0, "view":"agx",
+     "fps":24, "seed":0}
+`view`: "agx" (filmic, default), "aces", "standard". `exposure` in stops.
+
+## animation
+    {"frame_start":0, "frame_end":47, "tracks":[
+      {"node":"cam", "path":"translation", "keys":[[0,[3,2,5]],[47,[-3,2,5]]], "interp":"spline"},
+      {"node":"lamp", "path":"materials/0/inputs/emission_luminance", "keys":[[0,0],[24,30]]},
+      {"path":"world/rotation", "keys":[[0,0],[47,90]]},
+      {"node":"cam", "path":"translation",
+       "orbit":{"center":[0,1,0], "radius":5, "height":1, "start_deg":0, "degrees":360, "frames":[0,47]}}]}
+A track writes any numeric field: `node` = node name (omit for scene root), `path` =
+slash path into that node. `keys` = [frame, number or array]. `interp`: "linear"
+(default), "smooth" (ease in/out), "spline" (smooth through keys, best for cameras),
+"step". `orbit` circles a point instead of keys (0° = +Z side). `frame_end` defaults
+to the last key. Resolution and `world.hdri` can't be animated.

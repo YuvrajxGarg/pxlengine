@@ -7,13 +7,15 @@ use std::f32::consts::{PI, TAU};
 pub struct MeshData {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
 }
 
 impl MeshData {
-    fn push(&mut self, p: [f32; 3], n: [f32; 3]) -> u32 {
+    fn push(&mut self, p: [f32; 3], n: [f32; 3], uv: [f32; 2]) -> u32 {
         self.positions.push(p);
         self.normals.push(n);
+        self.uvs.push(uv);
         (self.positions.len() - 1) as u32
     }
 
@@ -31,6 +33,20 @@ impl MeshData {
 
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    /// Area-weighted vertex normals (for meshes that ship without normals).
+    pub fn compute_normals(&mut self) {
+        let mut n = vec![[0.0f32; 3]; self.positions.len()];
+        for t in self.indices.chunks_exact(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| glam::Vec3::from(self.positions[i as usize]));
+            let f = (b - a).cross(c - a);
+            for &i in t {
+                let v = &mut n[i as usize];
+                *v = (glam::Vec3::from(*v) + f).to_array();
+            }
+        }
+        self.normals = n.into_iter().map(|v| glam::Vec3::from(v).normalize_or(glam::Vec3::Y).to_array()).collect();
     }
 }
 
@@ -52,7 +68,7 @@ fn sphere(r: f32, seg: u32) -> MeshData {
         for j in 0..=seg {
             let ph = TAU * j as f32 / seg as f32;
             let n = [th.sin() * ph.cos(), th.cos(), th.sin() * ph.sin()];
-            m.push(n.map(|c| c * r), n);
+            m.push(n.map(|c| c * r), n, [j as f32 / seg as f32, i as f32 / rings as f32]);
         }
     }
     m.lattice(0, rings, seg);
@@ -63,8 +79,8 @@ fn sphere(r: f32, seg: u32) -> MeshData {
 fn grid([w, d]: [f32; 2]) -> MeshData {
     let mut m = MeshData::default();
     let (hw, hd) = (w * 0.5, d * 0.5);
-    for (x, z) in [(-hw, -hd), (hw, -hd), (-hw, hd), (hw, hd)] {
-        m.push([x, 0.0, z], [0.0, 1.0, 0.0]);
+    for (x, z, u, v) in [(-hw, -hd, 0.0, 0.0), (hw, -hd, 1.0, 0.0), (-hw, hd, 0.0, 1.0), (hw, hd, 1.0, 1.0)] {
+        m.push([x, 0.0, z], [0.0, 1.0, 0.0], [u, v]);
     }
     m.indices.extend_from_slice(&[0, 2, 1, 1, 2, 3]);
     m
@@ -85,7 +101,7 @@ fn cuboid([sx, sy, sz]: [f32; 3]) -> MeshData {
                 p[axis] = sign * h[axis];
                 p[u] = a * h[u];
                 p[v] = b * h[v];
-                m.push(p, n);
+                m.push(p, n, [(a + 1.0) * 0.5, (b + 1.0) * 0.5]);
             }
             m.lattice(base, 1, 1);
         }
@@ -100,16 +116,16 @@ fn cylinder(r: f32, height: f32, seg: u32) -> MeshData {
         let y = if i == 0 { -hy } else { hy };
         for j in 0..=seg {
             let a = TAU * j as f32 / seg as f32;
-            m.push([r * a.cos(), y, r * a.sin()], [a.cos(), 0.0, a.sin()]);
+            m.push([r * a.cos(), y, r * a.sin()], [a.cos(), 0.0, a.sin()], [j as f32 / seg as f32, i as f32]);
         }
     }
     m.lattice(0, 1, seg);
     for (y, ny) in [(-hy, -1.0f32), (hy, 1.0)] {
-        let c = m.push([0.0, y, 0.0], [0.0, ny, 0.0]);
+        let c = m.push([0.0, y, 0.0], [0.0, ny, 0.0], [0.5, 0.5]);
         let base = m.positions.len() as u32;
         for j in 0..=seg {
             let a = TAU * j as f32 / seg as f32;
-            m.push([r * a.cos(), y, r * a.sin()], [0.0, ny, 0.0]);
+            m.push([r * a.cos(), y, r * a.sin()], [0.0, ny, 0.0], [0.5 + 0.5 * a.cos(), 0.5 + 0.5 * a.sin()]);
         }
         for j in 0..seg {
             m.indices.extend_from_slice(&[c, base + j, base + j + 1]);
@@ -127,7 +143,7 @@ fn torus(r: f32, tube: f32, seg: u32) -> MeshData {
             let v = TAU * j as f32 / rings as f32;
             let n = [v.cos() * u.cos(), v.sin(), v.cos() * u.sin()];
             let p = [(r + tube * v.cos()) * u.cos(), tube * v.sin(), (r + tube * v.cos()) * u.sin()];
-            m.push(p, n);
+            m.push(p, n, [i as f32 / seg as f32, j as f32 / rings as f32]);
         }
     }
     m.lattice(0, seg, rings);

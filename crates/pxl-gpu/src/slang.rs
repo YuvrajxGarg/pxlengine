@@ -18,6 +18,20 @@ pub fn cache_dir() -> PathBuf {
     base.join("pxl").join("cache")
 }
 
+/// Find an executable on PATH. Splits on the separator and strips quotes per entry, so a
+/// stray `"` in PATH (which makes `std::env::split_paths` and `Command` swallow the rest of
+/// PATH into one entry) doesn't hide tools.
+pub fn find_on_path(exe: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    path.to_string_lossy()
+        .split(sep)
+        .map(|d| d.trim().trim_matches('"'))
+        .filter(|d| !d.is_empty())
+        .map(|d| Path::new(d).join(exe))
+        .find(|p| p.is_file())
+}
+
 pub fn find_slangc() -> Result<PathBuf> {
     let exe = if cfg!(windows) { "slangc.exe" } else { "slangc" };
     if let Some(p) = std::env::var_os("PXL_SLANGC") {
@@ -40,13 +54,8 @@ pub fn find_slangc() -> Result<PathBuf> {
             }
         }
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let p = dir.join(exe);
-            if p.exists() {
-                return Ok(p);
-            }
-        }
+    if let Some(p) = find_on_path(exe) {
+        return Ok(p);
     }
     bail!("slangc not found: install the Vulkan SDK or set PXL_SLANGC")
 }
@@ -77,7 +86,7 @@ pub fn compile_compute(source: &str, entry: &str) -> Result<Vec<u8>> {
     let slangc = find_slangc()?;
     let out = Command::new(&slangc)
         .arg(&src)
-        .args(["-target", "spirv", "-profile", "spirv_1_6", "-stage", "compute", "-entry", entry, "-O2", "-o"])
+        .args(["-target", "spirv", "-profile", "spirv_1_6", "-capability", "spvRayQueryKHR", "-stage", "compute", "-entry", entry, "-O2", "-o"])
         .arg(&spv)
         .output()
         .with_context(|| format!("running {}", slangc.display()))?;

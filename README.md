@@ -23,7 +23,8 @@ cargo build --release
 
 ## Layout
 
-- `crates/pxl-scene` — scene JSON schema + std geometry
+- `crates/pxl-scene` — scene JSON schema, std geometry, animation tracks
+- `crates/pxl-assets` — glTF 2.0, texture and HDRI loading
 - `crates/pxl-gpu` — Vulkan device, buffers, BLAS/TLAS, compute pipelines, Slang compiler cache
 - `crates/pxl-render` — scene → GPU, progressive path tracing
 - `crates/pxl-cli` — the `pxl` binary
@@ -31,4 +32,5 @@ cargo build --release
 - `docs/help/` — agent-facing help topics (embedded)
 - `docs/ROADMAP.md` — phased plan and known gaps
 
-Status: phase 1 (core GPU path tracer) complete. See the roadmap.
+Status: phases 1-2 complete (GPU path tracer; glTF/texture/HDRI import, animation, MP4).
+See the roadmap. Test assets: `sh scripts/fetch-test-assets.sh` (Khronos + Poly Haven).

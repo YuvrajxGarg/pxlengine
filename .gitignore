@@ -3,3 +3,4 @@
 *.mp4
 !docs/images/*.png
 /out
+/assets

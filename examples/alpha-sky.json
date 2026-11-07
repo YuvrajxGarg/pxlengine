@@ -1,0 +1,8 @@
+{"version":1,"nodes":[
+  {"type":"asset","name":"alpha test","file":"../assets/AlphaBlendModeTest.glb","translation":[0,0.05,0]},
+  {"type":"mesh","name":"ground","geometry":{"std":"grid","size":[40,40]},
+   "materials":[{"inputs":{"base_color":[0.3,0.28,0.25],"specular_roughness":0.8}}]},
+  {"type":"camera","translation":[0,1.6,4.2],"target":[0,0.9,0],"fov":42}
+],
+"world":{"hdri":"../assets/kloofendal_48d_partly_cloudy_puresky_2k.hdr","strength":1,"rotation":120},
+"render":{"resolution":[960,540]}}

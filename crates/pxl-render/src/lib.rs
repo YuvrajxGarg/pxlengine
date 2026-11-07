@@ -1,12 +1,18 @@
-//! Turns a `pxl_scene::Scene` into GPU data and path traces it.
+//! Turns `pxl_scene::Scene`s into GPU data and path traces them, frame by frame.
 
-use anyhow::{Context as _, Result};
+pub mod film;
+mod library;
+
+use anyhow::{bail, Context as _, Result};
 use glam::{Mat3, Vec3};
-use pxl_gpu::{vk, Binding, BlasInput, Context, MemoryLocation, Resource, TlasInstance};
-use pxl_scene::{geometry, LightShape, Node, Scene};
+use library::{material_emission, Inst, Library};
+use pxl_gpu::{vk, Binding, BlasInput, Buffer, ComputePipeline, Context, MemoryLocation, Resource, TlasInstance};
+use pxl_scene::{LightShape, Node, Scene};
+use std::path::Path;
 use std::time::Instant;
 
 const PATHTRACE_SRC: &str = include_str!("../../../shaders/pathtrace.slang");
+const NONE: u32 = u32::MAX;
 
 /// Quality presets. `--set samples=N` / `bounces=N` (or scene render.samples) override.
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +38,8 @@ pub struct RenderOptions {
     pub samples: u32,
     pub bounces: u32,
     pub seed: u32,
+    /// Max radiance of indirect contributions (firefly control).
+    pub clamp: f32,
 }
 
 /// Linear HDR image, RGB f32.
@@ -41,12 +49,13 @@ pub struct Image {
     pub rgb: Vec<f32>,
 }
 
-#[derive(Debug, Default)]
-pub struct Stats {
+#[derive(Debug, Default, Clone)]
+pub struct FrameStats {
     pub triangles: usize,
     pub instances: usize,
     pub lights: usize,
-    pub setup_ms: f64,
+    pub emissive_triangles: usize,
+    pub build_ms: f64,
     pub render_ms: f64,
 }
 
@@ -54,194 +63,365 @@ fn bytes<T: Copy>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
-pub fn render(ctx: &mut Context, scene: &Scene, opts: &RenderOptions) -> Result<(Image, Stats)> {
-    let t0 = Instant::now();
-    let mut stats = Stats::default();
+pub struct Renderer {
+    pub ctx: Context,
+    pipe: ComputePipeline,
+}
 
-    // ---- gather geometry, materials, instances
-    let mut verts: Vec<[f32; 4]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    let mut materials: Vec<[f32; 8]> = Vec::new();
-    let mut instances: Vec<[f32; 16]> = Vec::new();
-    struct Pending { vertex_offset: u32, vertex_count: u32, index_offset: u32, tri_count: u32, transform: glam::Mat4 }
-    let mut pending = Vec::new();
+/// Static (whole-render) GPU data.
+struct Shared {
+    vbuf: Buffer,
+    ibuf: Buffer,
+    tex_info: Buffer,
+    texels: Buffer,
+    env_pix: Buffer,
+    env_marg: Buffer,
+    env_cond: Buffer,
+    env: Option<(u32, u32, f32)>,
+}
 
-    for node in &scene.nodes {
-        let Node::Mesh(m) = node else { continue };
-        let mesh = geometry::build(&m.geometry);
-        let vertex_offset = (verts.len() / 2) as u32;
-        let index_offset = indices.len() as u32;
-        for (p, n) in mesh.positions.iter().zip(&mesh.normals) {
-            verts.push([p[0], p[1], p[2], 1.0]);
-            verts.push([n[0], n[1], n[2], 0.0]);
+impl Renderer {
+    pub fn new() -> Result<Renderer> {
+        let mut ctx = Context::new()?;
+        let spirv = pxl_gpu::slang::compile_compute(PATHTRACE_SRC, "main").context("compiling path tracer")?;
+        let mut bindings = vec![Binding::Accel];
+        bindings.extend(std::iter::repeat(Binding::Storage).take(14));
+        let pipe = ctx.create_compute(&spirv, "main", &bindings, 16)?;
+        Ok(Renderer { ctx, pipe })
+    }
+
+    /// Render every scene in `scenes` (typically consecutive animation frames), calling `sink`
+    /// with each finished image. Geometry and textures are loaded and uploaded once.
+    pub fn render_sequence(
+        &mut self,
+        scenes: &[Scene],
+        base_dir: &Path,
+        opts: &RenderOptions,
+        mut sink: impl FnMut(usize, Image, &FrameStats) -> Result<()>,
+    ) -> Result<Vec<String>> {
+        let mut lib = Library::new(base_dir);
+        let mut per_frame = Vec::with_capacity(scenes.len());
+        for s in scenes {
+            per_frame.push(lib.instances(s)?);
+            lib.load_env(&s.world)?;
         }
-        indices.extend_from_slice(&mesh.indices);
-        let inputs = m.materials.first().map(|m| m.inputs.clone()).unwrap_or_default();
-        let e = inputs.emission_luminance;
-        materials.push([
-            inputs.base_color[0], inputs.base_color[1], inputs.base_color[2], inputs.specular_roughness,
-            inputs.emission_color[0] * e, inputs.emission_color[1] * e, inputs.emission_color[2] * e, inputs.base_metalness,
-        ]);
-        let xf = m.transform();
-        let nm = Mat3::from_mat4(xf).inverse().transpose();
-        let mat_index = (materials.len() - 1) as u32;
-        let mut inst = [0f32; 16];
-        inst[0] = f32::from_bits(vertex_offset);
-        inst[1] = f32::from_bits(index_offset);
-        inst[2] = f32::from_bits(mat_index);
-        for r in 0..3 {
-            let row = nm.row(r);
-            inst[4 + r * 4..7 + r * 4].copy_from_slice(&row.to_array());
+        let shared = self.upload_shared(&mut lib)?;
+        for (i, (scene, insts)) in scenes.iter().zip(&per_frame).enumerate() {
+            let (img, stats) = self.render_frame(&lib, &shared, scene, insts, opts)?;
+            sink(i, img, &stats)?;
         }
-        instances.push(inst);
-        stats.triangles += mesh.triangle_count();
-        pending.push(Pending {
-            vertex_offset,
-            vertex_count: mesh.positions.len() as u32,
-            index_offset,
-            tri_count: mesh.triangle_count() as u32,
-            transform: xf,
-        });
+        Ok(std::mem::take(&mut lib.warnings))
     }
-    stats.instances = instances.len();
 
-    // ---- lights
-    let mut lights: Vec<[f32; 16]> = Vec::new();
-    for node in &scene.nodes {
-        let Node::Light(l) = node else { continue };
-        let pos = Vec3::from(l.translation);
-        let color = Vec3::from(l.color);
-        let dir = (Vec3::from(l.target) - pos).try_normalize().unwrap_or(Vec3::NEG_Y);
-        let mut rec = [0f32; 16];
-        rec[0..3].copy_from_slice(&l.translation);
-        match l.shape {
-            LightShape::Point => {
-                rec[3] = 0.0;
-                let i = color * l.energy / (4.0 * std::f32::consts::PI); // W/sr
-                rec[4..7].copy_from_slice(&i.to_array());
+    fn upload_shared(&mut self, lib: &mut Library) -> Result<Shared> {
+        let ctx = &mut self.ctx;
+        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
+        let as_input = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
+
+        // Geometry: (position, u), (normal, v) per vertex.
+        let mut verts: Vec<[f32; 4]> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for m in &mut lib.meshes {
+            m.vertex_offset = (verts.len() / 2) as u32;
+            m.index_offset = indices.len() as u32;
+            let d = &m.data;
+            for i in 0..d.positions.len() {
+                let (p, n) = (d.positions[i], d.normals[i]);
+                let uv = d.uvs.get(i).copied().unwrap_or([0.0, 0.0]);
+                verts.push([p[0], p[1], p[2], uv[0]]);
+                verts.push([n[0], n[1], n[2], uv[1]]);
             }
-            LightShape::Rectangle => {
-                rec[3] = 1.0;
-                let [w, h] = l.size.xy();
-                let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-                // u x v must point along `dir` (the emitting side).
-                let u = up.cross(dir).normalize();
-                let v = dir.cross(u).normalize();
-                let (u, v) = (u * w * 0.5, v * h * 0.5);
-                let radiance = color * l.energy / (std::f32::consts::PI * w * h).max(1e-6);
-                rec[4..7].copy_from_slice(&radiance.to_array());
-                rec[8..11].copy_from_slice(&u.to_array());
-                rec[12..15].copy_from_slice(&v.to_array());
-            }
-            LightShape::Directional => {
-                rec[3] = 2.0;
-                rec[4..7].copy_from_slice(&(color * l.energy).to_array());
-                rec[8..11].copy_from_slice(&dir.to_array());
-            }
+            indices.extend_from_slice(&d.indices);
         }
-        lights.push(rec);
+        if verts.is_empty() {
+            verts.push([0.0; 4]);
+            indices.push(0);
+        }
+        let vbuf = ctx.create_buffer_init(bytes(&verts), storage | as_input, "vertices")?;
+        let ibuf = ctx.create_buffer_init(bytes(&indices), storage | as_input, "indices")?;
+        for m in &mut lib.meshes {
+            let blas = ctx.build_blas(&BlasInput {
+                vertex_address: vbuf.address + m.vertex_offset as u64 * 32,
+                vertex_stride: 32,
+                vertex_count: m.data.positions.len() as u32,
+                index_address: ibuf.address + m.index_offset as u64 * 4,
+                triangle_count: m.data.triangle_count() as u32,
+                opaque: m.opaque,
+            })?;
+            m.blas = Some(blas);
+        }
+
+        // Textures: RGBA8 texels packed into one buffer.
+        let mut info: Vec<[u32; 4]> = Vec::new();
+        let mut texels: Vec<u8> = Vec::new();
+        for t in &lib.textures {
+            info.push([(texels.len() / 4) as u32, t.width, t.height, 0]);
+            texels.extend_from_slice(&t.pixels);
+        }
+        info.push([0; 4]);
+        texels.extend_from_slice(&[0; 4]);
+        if texels.len() as u64 > 4 << 30 {
+            bail!("textures total {} MB; the current limit is 4096 MB", texels.len() >> 20);
+        }
+        let tex_info = ctx.create_buffer_init(bytes(&info), storage, "texture info")?;
+        let texels = ctx.create_buffer_init(&texels, storage, "texels")?;
+
+        // Environment map + importance sampling tables.
+        let (env_pix, env_marg, env_cond, env) = match &lib.env {
+            Some((_, img)) => {
+                let (marg, cond, total) = library::env_cdf(img);
+                (
+                    ctx.create_buffer_init(bytes(&img.rgb), storage, "env pixels")?,
+                    ctx.create_buffer_init(bytes(&marg), storage, "env marginal")?,
+                    ctx.create_buffer_init(bytes(&cond), storage, "env conditional")?,
+                    Some((img.width, img.height, total)),
+                )
+            }
+            None => {
+                let z = [0f32; 4];
+                (
+                    ctx.create_buffer_init(bytes(&z), storage, "env pixels")?,
+                    ctx.create_buffer_init(bytes(&z), storage, "env marginal")?,
+                    ctx.create_buffer_init(bytes(&z), storage, "env conditional")?,
+                    None,
+                )
+            }
+        };
+        Ok(Shared { vbuf, ibuf, tex_info, texels, env_pix, env_marg, env_cond, env })
     }
-    stats.lights = lights.len();
 
-    // ---- upload + acceleration structures
-    let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
-    let as_input = vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
-    if verts.is_empty() {
-        verts.push([0.0; 4]);
-        indices.push(0);
-    }
-    let vbuf = ctx.create_buffer_init(bytes(&verts), storage | as_input, "vertices")?;
-    let ibuf = ctx.create_buffer_init(bytes(&indices), storage | as_input, "indices")?;
-    let inst_buf = ctx.create_buffer_init(bytes(&instances.iter().copied().chain([[0f32; 16]]).collect::<Vec<_>>()), storage, "instances")?;
-    let mat_buf = ctx.create_buffer_init(bytes(&materials.iter().copied().chain([[0f32; 8]]).collect::<Vec<_>>()), storage, "materials")?;
-    let light_buf = ctx.create_buffer_init(bytes(&lights.iter().copied().chain([[0f32; 16]]).collect::<Vec<_>>()), storage, "lights")?;
+    fn render_frame(
+        &mut self,
+        lib: &Library,
+        sh: &Shared,
+        scene: &Scene,
+        insts: &[Inst],
+        opts: &RenderOptions,
+    ) -> Result<(Image, FrameStats)> {
+        let t0 = Instant::now();
+        let mut stats = FrameStats { instances: insts.len(), ..Default::default() };
+        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
 
-    let mut tlas_instances = Vec::new();
-    for (i, p) in pending.iter().enumerate() {
-        let (_, addr) = ctx.build_blas(&BlasInput {
-            vertex_address: vbuf.address + p.vertex_offset as u64 * 32,
-            vertex_stride: 32,
-            vertex_count: p.vertex_count,
-            index_address: ibuf.address + p.index_offset as u64 * 4,
-            triangle_count: p.tri_count,
-        })?;
-        let m = p.transform.transpose().to_cols_array(); // rows of the original
-        let mut t = [0f32; 12];
-        t.copy_from_slice(&m[..12]);
-        tlas_instances.push(TlasInstance { transform: t, custom_index: i as u32, mask: 0xff, blas_address: addr });
-    }
-    let tlas = ctx.build_tlas(&tlas_instances)?;
-
-    // ---- pipeline
-    let spirv = pxl_gpu::slang::compile_compute(PATHTRACE_SRC, "main").context("compiling path tracer")?;
-    let pipe = ctx.create_compute(
-        &spirv,
-        "main",
-        &[Binding::Accel, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage],
-        112,
-    )?;
-    let [w, h] = scene.render.resolution;
-    let pixels = w as u64 * h as u64;
-    let accum = ctx.create_buffer(pixels * 16, storage | vk::BufferUsageFlags::TRANSFER_SRC, MemoryLocation::GpuOnly, "accum")?;
-    let readback = ctx.create_buffer(pixels * 16, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "readback")?;
-    ctx.bind(
-        &pipe,
-        &[
-            Resource::Accel(tlas),
-            Resource::Buffer(vbuf),
-            Resource::Buffer(ibuf),
-            Resource::Buffer(inst_buf),
-            Resource::Buffer(mat_buf),
-            Resource::Buffer(light_buf),
-            Resource::Buffer(accum),
-        ],
-    );
-
-    // ---- camera
-    let cam = scene.camera();
-    let eye = Vec3::from(cam.translation);
-    let fwd = (Vec3::from(cam.target) - eye).try_normalize().unwrap_or(Vec3::NEG_Z);
-    let world_up = if fwd.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
-    let right = fwd.cross(world_up).normalize();
-    let up = right.cross(fwd);
-    let th = (cam.fov.to_radians() * 0.5).tan();
-    let aspect = w as f32 / h as f32;
-    let world = Vec3::from(scene.world.color) * scene.world.strength;
-
-    stats.setup_ms = t0.elapsed().as_secs_f64() * 1e3;
-    let t1 = Instant::now();
-
-    // ---- progressive samples, batched to stay well under the OS GPU watchdog
-    let groups = [w.div_ceil(8), h.div_ceil(8), 1];
-    let batch = (8_000_000 / pixels.max(1)).clamp(1, 64) as u32;
-    let mut s = 0;
-    while s < opts.samples {
-        let end = (s + batch).min(opts.samples);
-        let ctx_ref = &*ctx;
-        ctx_ref.submit(|cmd| {
-            for i in s..end {
-                let mut push = Vec::with_capacity(112);
-                for v in [eye.extend(0.0), fwd.extend(0.0), (right * th * aspect).extend(0.0), (up * th).extend(0.0), world.extend(0.0)] {
-                    push.extend_from_slice(bytes(&v.to_array()));
+        // ---- instances, materials, emissive triangles
+        let mut inst_rec: Vec<[u32; 16]> = Vec::with_capacity(insts.len() + 1);
+        let mut mats: Vec<[f32; 24]> = Vec::with_capacity(insts.len() + 1);
+        let mut emissive: Vec<[f32; 4]> = Vec::new();
+        let mut weights: Vec<f64> = Vec::new();
+        let mut tlas_inst = Vec::with_capacity(insts.len());
+        for (i, inst) in insts.iter().enumerate() {
+            let mesh = &lib.meshes[inst.mesh];
+            stats.triangles += mesh.data.triangle_count();
+            let m3 = Mat3::from_mat4(inst.xform);
+            let nm = if m3.determinant().abs() > 1e-24 { m3.inverse().transpose() } else { Mat3::IDENTITY };
+            let e = material_emission(&inst.material);
+            let e_lum = 0.2126 * e[0] + 0.7152 * e[1] + 0.0722 * e[2];
+            let emissive_offset = if e_lum > 0.0 {
+                let off = weights.len() as u32;
+                let d = &mesh.data;
+                let etex = library::material_texture(&inst.material, 3).and_then(|t| lib.textures.get(t));
+                let uv_scale = library::material_uv_scale(&inst.material);
+                for t in d.indices.chunks_exact(3) {
+                    let p = [t[0], t[1], t[2]].map(|k| inst.xform.transform_point3(Vec3::from(d.positions[k as usize])));
+                    let uv = [t[0], t[1], t[2]].map(|k| d.uvs.get(k as usize).copied().unwrap_or([0.0, 0.0]));
+                    let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
+                    // Weight by the emission texture's brightness over the triangle, so mostly-black
+                    // emission maps don't waste light samples. Zero-weight triangles are still lit by
+                    // BSDF rays (MIS gives them full weight there), so this stays unbiased.
+                    let tex_lum = etex.map_or(1.0, |img| library::triangle_texture_luminance(img, uv, uv_scale));
+                    weights.push((area * e_lum * tex_lum) as f64);
+                    emissive.push([p[0].x, p[0].y, p[0].z, uv[0][0]]);
+                    emissive.push([p[1].x, p[1].y, p[1].z, uv[0][1]]);
+                    emissive.push([p[2].x, p[2].y, p[2].z, uv[1][0]]);
+                    emissive.push([uv[1][1], uv[2][0], uv[2][1], f32::from_bits(i as u32)]);
                 }
-                push.extend_from_slice(bytes(&[w, h, i, lights.len() as u32, opts.seed, opts.bounces, 0, 0]));
-                ctx_ref.dispatch(cmd, &pipe, &push, groups);
-                ctx_ref.barrier(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER);
+                off
+            } else {
+                NONE
+            };
+            let mut r = [0u32; 16];
+            r[0] = mesh.vertex_offset;
+            r[1] = mesh.index_offset;
+            r[2] = i as u32;
+            r[3] = emissive_offset;
+            for row in 0..3 {
+                let v = nm.row(row);
+                r[4 + row * 4] = v.x.to_bits();
+                r[5 + row * 4] = v.y.to_bits();
+                r[6 + row * 4] = v.z.to_bits();
             }
-        })?;
-        s = end;
-    }
-    ctx.submit(|cmd| unsafe {
-        ctx.device.cmd_copy_buffer(cmd, accum.handle, readback.handle, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: pixels * 16 }]);
-    })?;
-    stats.render_ms = t1.elapsed().as_secs_f64() * 1e3;
+            inst_rec.push(r);
+            mats.push(inst.material);
+            let m = inst.xform.transpose().to_cols_array();
+            let mut transform = [0f32; 12];
+            transform.copy_from_slice(&m[..12]);
+            tlas_inst.push(TlasInstance {
+                transform,
+                custom_index: i as u32,
+                mask: 0xff,
+                blas_address: mesh.blas.expect("uploaded").address,
+            });
+        }
+        // GPU light table size (all triangles of emissive instances, so `offset + prim` indexing
+        // works); the stat reports only triangles that can actually be sampled.
+        let mut emissive_count = weights.len() as u32;
+        stats.emissive_triangles = weights.iter().filter(|w| **w > 0.0).count();
+        let total: f64 = weights.iter().sum();
+        let mut cdf: Vec<f32> = Vec::with_capacity(weights.len() + 1);
+        let mut acc = 0f64;
+        cdf.push(0.0);
+        for w in &weights {
+            acc += w;
+            cdf.push(if total > 0.0 { (acc / total) as f32 } else { 0.0 });
+        }
+        if let Some(last) = cdf.last_mut() {
+            *last = 1.0;
+        }
+        if total <= 0.0 {
+            emissive.clear();
+            emissive_count = 0;
+            stats.emissive_triangles = 0;
+        }
 
-    let raw = ctx.read(&readback)?;
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) };
-    let mut rgb = Vec::with_capacity(pixels as usize * 3);
-    for px in data.chunks_exact(4) {
-        let n = px[3].max(1.0);
-        rgb.extend_from_slice(&[px[0] / n, px[1] / n, px[2] / n]);
+        // ---- analytic lights
+        let mut lights: Vec<[f32; 16]> = Vec::new();
+        for node in &scene.nodes {
+            let Node::Light(l) = node else { continue };
+            let pos = Vec3::from(l.translation);
+            let color = Vec3::from(l.color);
+            let dir = (Vec3::from(l.target) - pos).try_normalize().unwrap_or(Vec3::NEG_Y);
+            let mut rec = [0f32; 16];
+            rec[0..3].copy_from_slice(&l.translation);
+            match l.shape {
+                LightShape::Point => {
+                    rec[3] = 0.0;
+                    rec[4..7].copy_from_slice(&(color * l.energy / (4.0 * std::f32::consts::PI)).to_array());
+                }
+                LightShape::Rectangle => {
+                    rec[3] = 1.0;
+                    let [w, h] = l.size.xy();
+                    let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+                    let u = up.cross(dir).normalize(); // u x v points along `dir`
+                    let v = dir.cross(u).normalize();
+                    let radiance = color * l.energy / (std::f32::consts::PI * w * h).max(1e-6);
+                    rec[4..7].copy_from_slice(&radiance.to_array());
+                    rec[8..11].copy_from_slice(&(u * w * 0.5).to_array());
+                    rec[12..15].copy_from_slice(&(v * h * 0.5).to_array());
+                }
+                LightShape::Directional => {
+                    rec[3] = 2.0;
+                    rec[4..7].copy_from_slice(&(color * l.energy).to_array());
+                    rec[8..11].copy_from_slice(&dir.to_array());
+                }
+            }
+            lights.push(rec);
+        }
+        stats.lights = lights.len();
+
+        // ---- light category probabilities
+        let has = [!lights.is_empty(), emissive_count > 0, sh.env.is_some()];
+        let n = has.iter().filter(|h| **h).count().max(1) as f32;
+        let p = has.map(|h| if h { 1.0 / n } else { 0.0 });
+
+        // ---- camera + frame constants
+        let [w, h] = scene.render.resolution;
+        let cam = scene.camera();
+        let eye = Vec3::from(cam.translation);
+        let fwd = (Vec3::from(cam.target) - eye).try_normalize().unwrap_or(Vec3::NEG_Z);
+        let world_up = if fwd.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
+        let right = fwd.cross(world_up).normalize();
+        let up = right.cross(fwd);
+        let th = (cam.fov.to_radians() * 0.5).tan();
+        let aspect = w as f32 / h as f32;
+        let world = Vec3::from(scene.world.color) * scene.world.strength;
+        let (env_w, env_h, env_total) = sh.env.unwrap_or((0, 0, 0.0));
+        let mut frame: Vec<u8> = Vec::with_capacity(144);
+        for v in [
+            eye.extend(0.0),
+            fwd.extend(0.0),
+            (right * th * aspect).extend(0.0),
+            (up * th).extend(0.0),
+            world.extend(scene.world.strength),
+        ] {
+            frame.extend_from_slice(bytes(&v.to_array()));
+        }
+        frame.extend_from_slice(bytes(&[w, h, lights.len() as u32, opts.bounces]));
+        frame.extend_from_slice(bytes(&[opts.seed, emissive_count, env_w, env_h]));
+        frame.extend_from_slice(bytes(&[scene.world.rotation / 360.0, env_total, p[0], p[1]]));
+        frame.extend_from_slice(bytes(&[p[2], opts.clamp, 0.0, 0.0]));
+
+        // ---- upload per-frame data
+        let ctx = &mut self.ctx;
+        inst_rec.push([0; 16]);
+        mats.push([0.0; 24]);
+        lights.push([0.0; 16]);
+        emissive.push([0.0; 4]);
+        let inst_buf = ctx.create_buffer_init(bytes(&inst_rec), storage, "instances")?;
+        let mat_buf = ctx.create_buffer_init(bytes(&mats), storage, "materials")?;
+        let light_buf = ctx.create_buffer_init(bytes(&lights), storage, "lights")?;
+        let em_buf = ctx.create_buffer_init(bytes(&emissive), storage, "emissive")?;
+        let cdf_buf = ctx.create_buffer_init(bytes(&cdf), storage, "emissive cdf")?;
+        let frame_buf = ctx.create_buffer_init(&frame, storage, "frame")?;
+        let tlas = ctx.build_tlas(&tlas_inst)?;
+        let pixels = w as u64 * h as u64;
+        let accum = ctx.create_buffer(pixels * 16, storage | vk::BufferUsageFlags::TRANSFER_SRC, MemoryLocation::GpuOnly, "accum")?;
+        let readback = ctx.create_buffer(pixels * 16, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "readback")?;
+        ctx.bind(
+            &self.pipe,
+            &[
+                Resource::Accel(tlas.handle),
+                Resource::Buffer(sh.vbuf),
+                Resource::Buffer(sh.ibuf),
+                Resource::Buffer(inst_buf),
+                Resource::Buffer(mat_buf),
+                Resource::Buffer(light_buf),
+                Resource::Buffer(accum),
+                Resource::Buffer(sh.tex_info),
+                Resource::Buffer(sh.texels),
+                Resource::Buffer(em_buf),
+                Resource::Buffer(cdf_buf),
+                Resource::Buffer(sh.env_pix),
+                Resource::Buffer(sh.env_marg),
+                Resource::Buffer(sh.env_cond),
+                Resource::Buffer(frame_buf),
+            ],
+        );
+        stats.build_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        // ---- progressive samples, batched to stay well under the OS GPU watchdog
+        let t1 = Instant::now();
+        let groups = [w.div_ceil(8), h.div_ceil(8), 1];
+        let batch = (4_000_000 / pixels.max(1)).clamp(1, 32) as u32;
+        let pipe = self.pipe;
+        let mut s = 0;
+        while s < opts.samples {
+            let end = (s + batch).min(opts.samples);
+            let c = &*ctx;
+            c.submit(|cmd| {
+                for i in s..end {
+                    c.dispatch(cmd, &pipe, bytes(&[i, 0u32, 0, 0]), groups);
+                    c.barrier(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER);
+                }
+            })?;
+            s = end;
+        }
+        let c = &*ctx;
+        c.submit(|cmd| unsafe {
+            c.device.cmd_copy_buffer(cmd, accum.handle, readback.handle, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: pixels * 16 }]);
+        })?;
+        stats.render_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+        let raw = ctx.read(&readback)?;
+        let data: &[f32] = unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) };
+        let mut rgb = Vec::with_capacity(pixels as usize * 3);
+        for px in data.chunks_exact(4).take(pixels as usize) {
+            let n = px[3].max(1.0);
+            rgb.extend_from_slice(&[px[0] / n, px[1] / n, px[2] / n]);
+        }
+
+        for b in [inst_buf, mat_buf, light_buf, em_buf, cdf_buf, frame_buf, accum, readback] {
+            ctx.destroy_buffer(b);
+        }
+        ctx.destroy_accel(tlas);
+        Ok((Image { width: w, height: h, rgb }, stats))
     }
-    Ok((Image { width: w, height: h, rgb }, stats))
 }

@@ -5,7 +5,7 @@ mod accel;
 mod compute;
 pub mod slang;
 
-pub use accel::{BlasInput, TlasInstance};
+pub use accel::{Accel, BlasInput, TlasInstance};
 pub use ash::vk;
 pub use compute::{Binding, ComputePipeline, Resource};
 pub use gpu_allocator::MemoryLocation;
@@ -51,7 +51,7 @@ pub struct Context {
     cmd_pool: vk::CommandPool,
     allocator: Option<Allocator>,
     buffers: Vec<Option<(vk::Buffer, Allocation)>>,
-    pub(crate) accels: Vec<vk::AccelerationStructureKHR>,
+    pub(crate) accels: Vec<Option<vk::AccelerationStructureKHR>>,
     pub(crate) pipelines: Vec<ComputePipeline>,
     debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
@@ -286,7 +286,7 @@ impl Drop for Context {
             for p in self.pipelines.drain(..) {
                 p.destroy(&self.device);
             }
-            for a in self.accels.drain(..) {
+            for a in self.accels.drain(..).flatten() {
                 self.as_loader.destroy_acceleration_structure(a, None);
             }
             for (handle, alloc) in self.buffers.drain(..).flatten() {

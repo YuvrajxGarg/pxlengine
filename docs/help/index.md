@@ -4,6 +4,7 @@ Write a scene as JSON, render it, look at the image, revise. No editor.
 
     pxl render shot.json --profile std/previs --out preview.png   # fast look
     pxl render shot.json --profile std/final  --out final.png     # delivery
+    pxl render shot.json --profile std/draft  --out clip.mp4      # animation -> video
     pxl help scene    # every node type and field
     pxl help render   # profiles, --set overrides, output
     pxl info          # which GPU is used
@@ -33,3 +34,7 @@ Write a scene as JSON, render it, look at the image, revise. No editor.
 1. Block the shot with std/previs at low resolution.
 2. Inspect the PNG; fix framing (camera translation/target/fov) first, then light.
 3. Render std/draft to judge materials; std/final for delivery.
+4. For motion: check timing with std/previs video first, then render the final clip.
+
+Real-world detail comes from assets: import glTF models (`"type":"asset"`), light with
+an HDRI (`world.hdri`), and texture surfaces (`base_color_texture`, `normal_texture`).

@@ -1,6 +1,6 @@
 //! Bottom/top-level acceleration structures for inline ray queries.
 
-use crate::{Context, MemoryLocation};
+use crate::{Buffer, Context, MemoryLocation};
 use anyhow::Result;
 use ash::vk;
 
@@ -12,6 +12,17 @@ pub struct BlasInput {
     pub vertex_count: u32,
     pub index_address: u64,
     pub triangle_count: u32,
+    /// false for alpha-masked geometry: ray queries then report candidates for alpha testing.
+    pub opaque: bool,
+}
+
+/// An acceleration structure plus its backing storage.
+#[derive(Debug, Clone, Copy)]
+pub struct Accel {
+    pub handle: vk::AccelerationStructureKHR,
+    pub address: u64,
+    storage: Buffer,
+    id: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -29,7 +40,7 @@ impl Context {
         ty: vk::AccelerationStructureTypeKHR,
         geometry: vk::AccelerationStructureGeometryKHR<'_>,
         primitive_count: u32,
-    ) -> Result<(vk::AccelerationStructureKHR, u64)> {
+    ) -> Result<Accel> {
         let geoms = [geometry];
         let mut build = vk::AccelerationStructureBuildGeometryInfoKHR::default()
             .ty(ty)
@@ -60,7 +71,8 @@ impl Context {
                 None,
             )?
         };
-        self.accels.push(accel);
+        self.accels.push(Some(accel));
+        let id = self.accels.len() - 1;
         let align = self.scratch_align;
         let scratch = self.create_buffer(
             sizes.build_scratch_size + align,
@@ -83,11 +95,17 @@ impl Context {
                 &vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(accel),
             )
         };
-        Ok((accel, address))
+        Ok(Accel { handle: accel, address, storage, id })
     }
 
-    /// Build one BLAS; returns (handle, device address).
-    pub fn build_blas(&mut self, input: &BlasInput) -> Result<(vk::AccelerationStructureKHR, u64)> {
+    pub fn destroy_accel(&mut self, a: Accel) {
+        if let Some(h) = self.accels[a.id].take() {
+            unsafe { self.as_loader.destroy_acceleration_structure(h, None) };
+            self.destroy_buffer(a.storage);
+        }
+    }
+
+    pub fn build_blas(&mut self, input: &BlasInput) -> Result<Accel> {
         let tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
             .vertex_format(vk::Format::R32G32B32_SFLOAT)
             .vertex_data(vk::DeviceOrHostAddressConstKHR { device_address: input.vertex_address })
@@ -98,11 +116,11 @@ impl Context {
         let geom = vk::AccelerationStructureGeometryKHR::default()
             .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
             .geometry(vk::AccelerationStructureGeometryDataKHR { triangles: tri })
-            .flags(vk::GeometryFlagsKHR::OPAQUE);
+            .flags(if input.opaque { vk::GeometryFlagsKHR::OPAQUE } else { vk::GeometryFlagsKHR::NO_DUPLICATE_ANY_HIT_INVOCATION });
         self.build_accel(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL, geom, input.triangle_count)
     }
 
-    pub fn build_tlas(&mut self, instances: &[TlasInstance]) -> Result<vk::AccelerationStructureKHR> {
+    pub fn build_tlas(&mut self, instances: &[TlasInstance]) -> Result<Accel> {
         let raw: Vec<vk::AccelerationStructureInstanceKHR> = instances
             .iter()
             .map(|i| vk::AccelerationStructureInstanceKHR {
@@ -134,7 +152,8 @@ impl Context {
                     .array_of_pointers(false)
                     .data(vk::DeviceOrHostAddressConstKHR { device_address: buf.address }),
             });
-        let (tlas, _) = self.build_accel(vk::AccelerationStructureTypeKHR::TOP_LEVEL, geom, instances.len() as u32)?;
-        Ok(tlas)
+        let tlas = self.build_accel(vk::AccelerationStructureTypeKHR::TOP_LEVEL, geom, instances.len() as u32);
+        self.destroy_buffer(buf);
+        tlas
     }
 }

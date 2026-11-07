@@ -1,12 +1,15 @@
 //! Scene description for pxlengine: strict JSON (unknown fields are errors, so agents
-//! learn about typos immediately) plus built-in ("std") geometry generators.
+//! learn about typos immediately), std geometry generators, and animation tracks.
 
+pub mod anim;
 pub mod geometry;
 
 use anyhow::{bail, Context, Result};
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde::Deserialize;
+use serde_json::Value;
 
+pub use anim::{Animation, Interp, Orbit, Track};
 pub use geometry::MeshData;
 
 pub const SCENE_VERSION: u32 = 1;
@@ -21,14 +24,25 @@ pub struct Scene {
     pub world: World,
     #[serde(default)]
     pub render: RenderSettings,
+    #[serde(default)]
+    pub animation: Option<Animation>,
+    /// The JSON this scene was parsed from; animation tracks are applied to it per frame.
+    #[serde(skip)]
+    raw: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Node {
     Mesh(MeshNode),
+    Asset(AssetNode),
     Light(LightNode),
     Camera(CameraNode),
+}
+
+pub fn trs(t: [f32; 3], r_deg: [f32; 3], s: [f32; 3]) -> Mat4 {
+    let r = r_deg.map(f32::to_radians);
+    Mat4::from_scale_rotation_translation(Vec3::from(s), Quat::from_euler(EulerRot::XYZ, r[0], r[1], r[2]), Vec3::from(t))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,12 +64,29 @@ pub struct MeshNode {
 
 impl MeshNode {
     pub fn transform(&self) -> Mat4 {
-        let r = self.rotation.map(f32::to_radians);
-        Mat4::from_scale_rotation_translation(
-            Vec3::from(self.scale),
-            Quat::from_euler(EulerRot::XYZ, r[0], r[1], r[2]),
-            Vec3::from(self.translation),
-        )
+        trs(self.translation, self.rotation, self.scale)
+    }
+}
+
+/// A glTF 2.0 file (.glb or .gltf) placed in the scene.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetNode {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Path relative to the scene file.
+    pub file: String,
+    #[serde(default)]
+    pub translation: [f32; 3],
+    #[serde(default)]
+    pub rotation: [f32; 3],
+    #[serde(default = "one3")]
+    pub scale: [f32; 3],
+}
+
+impl AssetNode {
+    pub fn transform(&self) -> Mat4 {
+        trs(self.translation, self.rotation, self.scale)
     }
 }
 
@@ -108,15 +139,33 @@ pub struct Material {
 pub struct MaterialInputs {
     #[serde(default = "grey")]
     pub base_color: [f32; 3],
+    /// sRGB image multiplied with base_color.
+    #[serde(default)]
+    pub base_color_texture: Option<String>,
     #[serde(default = "half")]
     pub specular_roughness: f32,
+    /// Greyscale (red channel) image multiplied with specular_roughness.
+    #[serde(default)]
+    pub specular_roughness_texture: Option<String>,
     #[serde(default)]
     pub base_metalness: f32,
+    #[serde(default)]
+    pub base_metalness_texture: Option<String>,
     #[serde(default = "one3")]
     pub emission_color: [f32; 3],
+    #[serde(default)]
+    pub emission_color_texture: Option<String>,
     /// Emitted radiance scale (W/sr/m²); 0 = not emissive.
     #[serde(default)]
     pub emission_luminance: f32,
+    /// Tangent-space normal map (OpenGL / +Y convention, as glTF and Poly Haven "nor_gl").
+    #[serde(default)]
+    pub normal_texture: Option<String>,
+    #[serde(default = "one")]
+    pub normal_scale: f32,
+    /// Texture tiling.
+    #[serde(default = "one2")]
+    pub uv_scale: [f32; 2],
 }
 
 impl Default for MaterialInputs {
@@ -188,17 +237,34 @@ pub struct CameraNode {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct World {
-    /// Uniform environment radiance seen by rays that escape the scene.
+    /// Uniform environment radiance (used when no `hdri`).
     #[serde(default = "world_color")]
     pub color: [f32; 3],
     #[serde(default = "one")]
     pub strength: f32,
+    /// Equirectangular .hdr / .exr environment, path relative to the scene file.
+    #[serde(default)]
+    pub hdri: Option<String>,
+    /// Rotate the HDRI around +Y, degrees.
+    #[serde(default)]
+    pub rotation: f32,
 }
 
 impl Default for World {
     fn default() -> Self {
         serde_json::from_str("{}").unwrap()
     }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum View {
+    /// Blender-style AgX filmic curve (default): soft highlights, no hue skew.
+    #[default]
+    Agx,
+    Aces,
+    /// Plain sRGB clip.
+    Standard,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -214,7 +280,11 @@ pub struct RenderSettings {
     #[serde(default)]
     pub exposure: f32,
     #[serde(default)]
+    pub view: View,
+    #[serde(default)]
     pub seed: u32,
+    #[serde(default = "fps")]
+    pub fps: f32,
 }
 
 impl Default for RenderSettings {
@@ -226,24 +296,57 @@ impl Default for RenderSettings {
 impl Scene {
     pub fn from_json(text: &str) -> Result<Scene> {
         let de = &mut serde_json::Deserializer::from_str(text);
-        let scene: Scene = serde_path_to_error(de)?;
-        if scene.version != SCENE_VERSION {
-            bail!("scene version {} is not supported (expected {SCENE_VERSION})", scene.version);
+        let mut scene = Scene::deserialize(de).map_err(|e| anyhow::anyhow!("invalid scene: {e}"))?;
+        scene.raw = serde_json::from_str(text)?;
+        scene.validate()?;
+        if let Some(anim) = &scene.animation {
+            anim.validate(&scene.raw)?;
+            // Evaluate once so bad paths / values fail before any GPU work.
+            scene.at_frame(anim.frame_start as f64)?;
         }
-        let cams = scene.nodes.iter().filter(|n| matches!(n, Node::Camera(_))).count();
-        if cams == 0 {
+        Ok(scene)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.version != SCENE_VERSION {
+            bail!("scene version {} is not supported (expected {SCENE_VERSION})", self.version);
+        }
+        if !self.nodes.iter().any(|n| matches!(n, Node::Camera(_))) {
             bail!("scene has no camera node; add {{\"type\":\"camera\",\"translation\":[x,y,z],\"target\":[0,0,0]}}");
         }
-        let [w, h] = scene.render.resolution;
+        let [w, h] = self.render.resolution;
         if w == 0 || h == 0 || w > 16384 || h > 16384 {
             bail!("render.resolution must be within 1..16384, got [{w},{h}]");
         }
-        Ok(scene)
+        if !(self.render.fps > 0.0) {
+            bail!("render.fps must be > 0");
+        }
+        Ok(())
     }
 
     pub fn load(path: &std::path::Path) -> Result<Scene> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Scene::from_json(&text).with_context(|| format!("in {}", path.display()))
+    }
+
+    /// The scene with all animation tracks evaluated at `frame`.
+    pub fn at_frame(&self, frame: f64) -> Result<Scene> {
+        let Some(anim) = &self.animation else { return Ok(self.clone()) };
+        let mut raw = self.raw.clone();
+        for (i, track) in anim.tracks.iter().enumerate() {
+            let v = track.eval(frame).with_context(|| format!("animation.tracks[{i}]"))?;
+            anim::apply(&mut raw, track, v).with_context(|| format!("animation.tracks[{i}]"))?;
+        }
+        let mut s: Scene = serde_json::from_value(raw.clone())
+            .map_err(|e| anyhow::anyhow!("scene invalid at frame {frame} after animation: {e}"))?;
+        s.raw = raw;
+        s.validate()?;
+        Ok(s)
+    }
+
+    /// Inclusive frame range of the animation, if any.
+    pub fn frame_range(&self) -> Option<(i32, i32)> {
+        self.animation.as_ref().map(|a| (a.frame_start, a.end()))
     }
 
     pub fn camera(&self) -> &CameraNode {
@@ -257,17 +360,13 @@ impl Scene {
     }
 }
 
-/// serde_json errors already carry line/column; this keeps the message agent-readable.
-fn serde_path_to_error(de: &mut serde_json::Deserializer<serde_json::de::StrRead>) -> Result<Scene> {
-    Scene::deserialize(de).map_err(|e| anyhow::anyhow!("invalid scene: {e}"))
-}
-
 fn one() -> f32 { 1.0 }
 fn two() -> f32 { 2.0 }
 fn half() -> f32 { 0.5 }
 fn quarter() -> f32 { 0.25 }
 fn hundred() -> f32 { 100.0 }
 fn fov() -> f32 { 40.0 }
+fn fps() -> f32 { 24.0 }
 fn seg64() -> u32 { 64 }
 fn one2() -> [f32; 2] { [1.0, 1.0] }
 fn one3() -> [f32; 3] { [1.0, 1.0, 1.0] }
@@ -292,5 +391,49 @@ mod tests {
     fn rejects_typos() {
         let e = Scene::from_json(r#"{"version":1,"nodes":[{"type":"camera","fvo":30}]}"#).unwrap_err();
         assert!(format!("{e:#}").contains("fvo"), "{e:#}");
+    }
+
+    #[test]
+    fn animates_fields() {
+        let s = Scene::from_json(
+            r#"{"version":1,"nodes":[
+                {"type":"camera","name":"cam","translation":[0,1,5]},
+                {"type":"mesh","name":"ball","geometry":{"std":"sphere"}}],
+              "animation":{"frame_end":10,"tracks":[
+                {"node":"cam","path":"translation","keys":[[0,[0,1,5]],[10,[10,1,5]]]},
+                {"node":"ball","path":"materials/0/inputs/emission_luminance","keys":[[0,0],[10,20]]},
+                {"path":"render/exposure","keys":[[0,0],[10,2]],"interp":"step"}]}}"#,
+        )
+        .unwrap();
+        let f = s.at_frame(5.0).unwrap();
+        assert!((f.camera().translation[0] - 5.0).abs() < 1e-5);
+        let Node::Mesh(m) = &f.nodes[1] else { panic!() };
+        assert!((m.materials[0].inputs.emission_luminance - 10.0).abs() < 1e-5);
+        assert_eq!(f.render.exposure, 0.0);
+        assert_eq!(s.at_frame(10.0).unwrap().render.exposure, 2.0);
+        assert_eq!(s.frame_range(), Some((0, 10)));
+    }
+
+    #[test]
+    fn rejects_unknown_track_node() {
+        let e = Scene::from_json(
+            r#"{"version":1,"nodes":[{"type":"camera"}],
+              "animation":{"tracks":[{"node":"nope","path":"translation","keys":[[0,[0,0,0]]]}]}}"#,
+        )
+        .unwrap_err();
+        assert!(format!("{e:#}").contains("nope"), "{e:#}");
+    }
+
+    #[test]
+    fn orbit_track() {
+        let s = Scene::from_json(
+            r#"{"version":1,"nodes":[{"type":"camera","name":"cam"}],
+              "animation":{"tracks":[{"node":"cam","path":"translation",
+                "orbit":{"center":[0,0,0],"radius":4,"height":1,"frames":[0,40]}}]}}"#,
+        )
+        .unwrap();
+        let f = s.at_frame(10.0).unwrap();
+        let t = f.camera().translation;
+        assert!((t[0] - 4.0).abs() < 1e-4 && (t[1] - 1.0).abs() < 1e-4 && t[2].abs() < 1e-4, "{t:?}");
     }
 }
