@@ -9,7 +9,7 @@ pub use program::ProgramSet;
 
 use anyhow::{bail, Context as _, Result};
 use glam::{Mat3, Vec3};
-use library::{material_emission, Inst, Library};
+use library::{material_emission, material_role, Inst, Library};
 use pxl_gpu::{vk, Binding, BlasInput, Buffer, ComputePipeline, Context, MemoryLocation, Resource, TlasInstance};
 use pxl_scene::{LightShape, Node, Scene};
 use std::path::Path;
@@ -64,6 +64,12 @@ pub struct Image {
     pub alpha: Vec<f32>,
     /// Scene node index of the first hit (u32::MAX for background), from the first sample.
     pub object: Vec<u32>,
+    /// CG only, premultiplied by `alpha` (no background): for compositing over a plate.
+    pub cg: Vec<f32>,
+    /// What the camera sees behind CG (environment), premultiplied by 1 - alpha.
+    pub background: Vec<f32>,
+    /// Multiplier for the background/plate from shadow catchers (1 = unshadowed).
+    pub shadow: Vec<f32>,
     pub denoised: bool,
 }
 
@@ -288,8 +294,8 @@ impl Renderer {
         let src = vk::BufferUsageFlags::TRANSFER_SRC;
         let ctx = &mut self.ctx;
         let accum = ctx.create_buffer(pixels * 16, storage | src, MemoryLocation::GpuOnly, "accum")?;
-        let aux = ctx.create_buffer(pixels * 48, storage | src, MemoryLocation::GpuOnly, "aux")?;
-        let readback = ctx.create_buffer(pixels * 64, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "readback")?;
+        let aux = ctx.create_buffer(pixels * 64, storage | src, MemoryLocation::GpuOnly, "aux")?;
+        let readback = ctx.create_buffer(pixels * 80, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "readback")?;
 
         let mut stats = FrameStats::default();
         let k = subframes.len() as u32;
@@ -306,7 +312,7 @@ impl Renderer {
         let c = &self.ctx;
         c.submit(|cmd| unsafe {
             c.device.cmd_copy_buffer(cmd, accum.handle, readback.handle, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: pixels * 16 }]);
-            c.device.cmd_copy_buffer(cmd, aux.handle, readback.handle, &[vk::BufferCopy { src_offset: 0, dst_offset: pixels * 16, size: pixels * 48 }]);
+            c.device.cmd_copy_buffer(cmd, aux.handle, readback.handle, &[vk::BufferCopy { src_offset: 0, dst_offset: pixels * 16, size: pixels * 64 }]);
         })?;
         let raw = c.read(&readback)?;
         let data: &[f32] = unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) };
@@ -320,19 +326,29 @@ impl Renderer {
             depth: Vec::with_capacity(np),
             alpha: Vec::with_capacity(np),
             object: Vec::with_capacity(np),
+            cg: Vec::with_capacity(np * 3),
+            background: Vec::with_capacity(np * 3),
+            shadow: Vec::with_capacity(np),
             denoised: false,
         };
+        let mut catcher = Vec::with_capacity(np);
+        let mut sh_lit = Vec::with_capacity(np * 3);
+        let mut sh_open = Vec::with_capacity(np * 3);
         let (beauty, aovs) = data.split_at(np * 4);
-        for (px, a) in beauty.chunks_exact(4).zip(aovs.chunks_exact(12)) {
+        for (px, a) in beauty.chunks_exact(4).zip(aovs.chunks_exact(16)) {
             let inv = 1.0 / px[3].max(1.0);
-            img.rgb.extend_from_slice(&[px[0] * inv, px[1] * inv, px[2] * inv]);
+            img.cg.extend_from_slice(&[px[0] * inv, px[1] * inv, px[2] * inv]);
             img.albedo.extend_from_slice(&[a[0] * inv, a[1] * inv, a[2] * inv]);
             img.alpha.push(a[3] * inv);
-            // Depth averages only over samples that hit something.
-            img.depth.push(if a[3] > 0.0 { a[7] / a[3] } else { 0.0 });
+            // Depth averages only over samples that hit something (CG or proxies).
+            img.depth.push(if a[15] > 0.0 { a[7] / a[15] } else { 0.0 });
             let n = Vec3::new(a[4], a[5], a[6]).normalize_or_zero();
             img.normal.extend_from_slice(&n.to_array());
-            img.object.push(a[8].to_bits());
+            img.background.extend_from_slice(&[a[8] * inv, a[9] * inv, a[10] * inv]);
+            catcher.push(a[11] * inv);
+            img.object.push(a[12].to_bits());
+            sh_lit.extend_from_slice(&[a[13] * inv; 3]);
+            sh_open.extend_from_slice(&[a[14] * inv; 3]);
         }
         let ctx = &mut self.ctx;
         for b in [accum, aux, readback] {
@@ -346,7 +362,11 @@ impl Renderer {
             match self.denoiser.as_ref().unwrap() {
                 Ok(d) => {
                     let q = if opts.samples >= 32 { pxl_denoise::Quality::High } else { pxl_denoise::Quality::Balanced };
-                    d.denoise(&mut img.rgb, Some(&img.albedo), Some(&img.normal), w, h, q)?;
+                    d.denoise(&mut img.cg, Some(&img.albedo), Some(&img.normal), w, h, q)?;
+                    if catcher.iter().any(|c| *c > 0.0) {
+                        d.denoise(&mut sh_lit, None, None, w, h, q)?;
+                        d.denoise(&mut sh_open, None, None, w, h, q)?;
+                    }
                     img.denoised = true;
                 }
                 Err(e) => {
@@ -357,6 +377,19 @@ impl Renderer {
                 }
             }
         }
+        // Background multiplier: catcher pixels are darkened by the fraction of light CG blocks.
+        let strength = subframes[0].0.plate.as_ref().map_or(1.0, |p| p.shadow);
+        for i in 0..np {
+            let open = 1.0 - img.alpha[i];
+            let c = if open > 1e-4 { (catcher[i] / open).clamp(0.0, 1.0) } else { 0.0 };
+            let ratio = if sh_open[i * 3] > 1e-6 { (sh_lit[i * 3] / sh_open[i * 3]).clamp(0.0, 1.0) } else { 1.0 };
+            let f = 1.0 - c * (1.0 - ratio) * strength;
+            img.shadow.push(f);
+            for k in 0..3 {
+                img.rgb.push(img.cg[i * 3 + k] + img.background[i * 3 + k] * f);
+            }
+        }
+
         if let Some(film) = self.film_pipe {
             // Film program: one GPU pass over the finished (denoised) frame.
             let scene = &subframes[subframes.len() / 2].0;
@@ -464,7 +497,7 @@ impl Renderer {
             tlas_inst.push(TlasInstance {
                 transform,
                 custom_index: i as u32,
-                mask: 0xff,
+                mask: if material_role(&inst.material) == 0 { 0x01 } else { 0x02 },
                 blas_address: mesh.blas.expect("uploaded").address,
             });
         }
@@ -536,11 +569,7 @@ impl Renderer {
         // ---- camera + frame constants
         let [w, h] = scene.render.resolution;
         let cam = scene.camera();
-        let eye = Vec3::from(cam.translation);
-        let fwd = (Vec3::from(cam.target) - eye).try_normalize().unwrap_or(Vec3::NEG_Z);
-        let world_up = if fwd.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
-        let right = fwd.cross(world_up).normalize();
-        let up = right.cross(fwd);
+        let (eye, fwd, right, up) = cam.basis();
         let th = (cam.fov.to_radians() * 0.5).tan();
         let aspect = w as f32 / h as f32;
         let world = Vec3::from(scene.world.color) * scene.world.strength;

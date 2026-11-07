@@ -1,0 +1,17 @@
+{"version":1,
+"plate":{"file":"generated/plate_####.png"},
+"nodes":[
+  {"type":"mesh","name":"ground proxy","geometry":{"std":"grid","size":[60,60]},
+   "materials":[{"role":"shadow_catcher","inputs":{"base_color":[0.55,0.53,0.5]}}]},
+  {"type":"mesh","name":"crate proxy","translation":[-1.5,0.5,-0.6],"rotation":[0,20,0],"geometry":{"std":"box","size":[1,1,1]},
+   "materials":[{"role":"holdout","inputs":{"base_color":[0.55,0.33,0.16],"specular_roughness":0.75}}]},
+  {"type":"mesh","name":"pillar proxy","translation":[1.0,1.25,1.2],"geometry":{"std":"cylinder","radius":0.22,"height":2.5},
+   "materials":[{"role":"holdout","inputs":{"base_color":[0.7,0.7,0.68],"specular_roughness":0.6}}]},
+  {"type":"asset","name":"helmet","file":"../../assets/DamagedHelmet.glb","translation":[0.35,0.62,-0.5],"rotation":[0,-15,0],"scale":[0.62,0.62,0.62]},
+  {"type":"mesh","name":"chrome ball","translation":[-0.55,0.32,0.75],"geometry":{"std":"sphere","radius":0.32},
+   "materials":[{"inputs":{"base_color":[0.95,0.95,0.96],"base_metalness":1,"specular_roughness":0.04}}]},
+  {"type":"camera","name":"cam","track":"generated/cam.chan"}
+],
+"world":{"hdri":"../../assets/kloofendal_48d_partly_cloudy_puresky_2k.hdr","strength":1,"rotation":30},
+"render":{"resolution":[960,540]},
+"animation":{"frame_start":0,"frame_end":47}}

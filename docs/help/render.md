@@ -26,9 +26,10 @@ Denoising can smooth fine texture or grain; compare against std/path or raise sa
 `--set` keys: `samples=N`, `bounces=N`, `seed=N`, `exposure=EV`, `denoise=true|false`,
 `motion_blur=SHUTTER` (0..1), `clamp=X` (max indirect radiance, default 32).
 
-`--passes albedo,normal,depth,alpha,object` (or `all`) writes extra files beside the
+`--passes albedo,normal,depth,alpha,object,shadow` (or `all`) writes extra files beside the
 output: `shot.png` -> `shot.albedo.png`, `shot.depth.exr` (metres along the camera axis,
-always EXR), `shot.object.png` (one flat colour per scene node: a matte for each object).
+always EXR), `shot.object.png` (one flat colour per scene node: a matte for each object),
+`shot.shadow.png` (multiplier from shadow catchers: 1 = unshadowed).
 With EXR output every pass is EXR. With video, passes are numbered files beside the clip.
 
 Environment: `PXL_DEVICE=<name substring>` picks a GPU, `PXL_VALIDATION=1` enables

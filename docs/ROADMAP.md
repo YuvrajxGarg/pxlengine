@@ -64,7 +64,18 @@ There is no editor.
       Laptop: 1M boids ≈ 31 ms per step, instance+TLAS build ≈ 21 ms, 1280x720 16 spp trace ≈ 22 ms.
       Known gaps: no wing flapping / per-agent animation; one mesh per simulation; agents can't
       read the scene geometry (no collisions with meshes yet); state lives only within a render.
-- [ ] **6. VFX + libraries** – plate footage, tracked cameras, proxy geometry & shadow catchers,
-      occlusion mattes; fluids library (APIC/FLIP + surface reconstruction).
+- [x] **6a. VFX on footage** (done 2026-11-07) – `plate` (video via ffmpeg, image sequence or
+      still, frame offset, roto `matte`); material roles `shadow_catcher` (shadow ratio of light
+      with vs without CG occluders, via instance masks: CG = 0x01, proxies = 0x02; NEE + cosine
+      ambient, denoised) and `holdout`; camera `rotation` (ZXY) and `.chan` tracks (Nuke format)
+      with `pxl track` export; display-space composite (plate untouched outside CG/shadows),
+      linear composite for EXR; `shadow` pass. Validated with a synthetic round trip: a plate
+      rendered by pxl, its camera exported to .chan, CG composited back with proxies — CG stays
+      locked to the floor through a 48-frame dolly; video vs PNG plates agree within 1.2/255.
+      Known gaps: no camera solver (bring a .chan from a tracker); shadow catchers don't show
+      CG reflections on the real floor; plate lighting must be matched by hand (HDRI/lights);
+      no lens distortion model; single-layer holdouts (no soft roto edges beyond the matte).
+- [ ] **6b. Fluids library** – APIC/FLIP liquid on a uniform grid as Slang compute programs,
+      surface reconstruction, rendering as a dielectric (needs a glass/transmission BSDF).
 - [ ] **7. Agent ergonomics** – token-budgeted help (~2.5k tokens first page), `help field`
       lookups, Python/TypeScript SDKs, benchmarks vs Blender.

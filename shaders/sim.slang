@@ -124,8 +124,8 @@ void emit(uint3 id: SV_DispatchThreadID) {
     tlas_desc[i * 4 + 0] = asuint(float4(r.x * s, u.x * s, f.x * s, pos.x));
     tlas_desc[i * 4 + 1] = asuint(float4(r.y * s, u.y * s, f.y * s, pos.y));
     tlas_desc[i * 4 + 2] = asuint(float4(r.z * s, u.z * s, f.z * s, pos.z));
-    // custom index = instance index, mask 0xff; flags = TRIANGLE_FACING_CULL_DISABLE; BLAS address
-    tlas_desc[i * 4 + 3] = uint4(i | (0xffu << 24), 1u << 24, pc.blas_lo, pc.blas_hi);
+    // custom index = instance index, mask 0x01 (CG); flags = TRIANGLE_FACING_CULL_DISABLE; BLAS address
+    tlas_desc[i * 4 + 3] = uint4(i | (0x01u << 24), 1u << 24, pc.blas_lo, pc.blas_hi);   // mask: CG
     // Renderer instance: meta (vertex offset, index offset, material, no emissive), then the
     // normal matrix rows (rotation; scale is uniform), object id in n0.w, tint in n1.w.
     uint tint = a.color.a > 0 ? pack_rgba8(a.color) : 0u;

@@ -33,9 +33,10 @@ cargo build --release
 - `docs/help/` — agent-facing help topics (embedded)
 - `docs/ROADMAP.md` — phased plan and known gaps
 
-Status: phases 1-5 complete (GPU path tracer; glTF/texture/HDRI import, animation, video;
+Status: phases 1-5 and 6a complete (GPU path tracer; glTF/texture/HDRI import, animation, video;
 OIDN denoising, depth of field, motion blur, compositing passes, EXR; scene Slang programs
 for materials, cameras, light propagation and film - see `examples/black-hole.json`;
-GPU agent simulations with neighbour search - see `examples/birds-1m.json`, a million boids).
+GPU agent simulations with neighbour search - see `examples/birds-1m.json`, a million boids;
+CG over footage with tracked cameras, shadow catchers and holdouts - see `examples/vfx/`).
 See the roadmap. Test assets: `sh scripts/fetch-test-assets.sh` (Khronos + Poly Haven).
 Denoiser: `sh scripts/fetch-oidn.sh` (Intel Open Image Denoise into `vendor/oidn`).

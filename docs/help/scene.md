@@ -25,6 +25,7 @@ material inputs (OpenPBR names, defaults shown):
 - `uv_scale` [1,1]   texture tiling (e.g. [8,8] on a 10 m grid)
 A material may also name a program: `{"program":"marble","inputs":{...}}` (see
 `pxl help programs`); it runs after inputs and textures and can change any of them.
+`"role"`: "surface" (default), "shadow_catcher" or "holdout" (see `pxl help vfx`).
 Glowing meshes are real light sources (they light and shadow the scene).
 
 ## asset (glTF 2.0)
@@ -42,7 +43,8 @@ Units are metres; adjust `scale` if the model is tiny or huge.
 ## camera
     {"type":"camera", "translation":[0,1,5], "target":[0,0,0], "fov":40,
      "fstop":2.8, "focus_distance":?, "focus_target":[x,y,z]}
-`fov` = vertical, deg. `fstop` turns on depth of field (full-frame lens: 1.4 = very
+`rotation` [rx,ry,rz] deg (ZXY order) replaces `target`; `track` reads a .chan
+camera track (`pxl help vfx`). `fov` = vertical, deg. `fstop` turns on depth of field (full-frame lens: 1.4 = very
 shallow, 4 = moderate, 16 = nearly all sharp). Focus defaults to `focus_target`, else
 `target`; `focus_distance` (m) overrides both. Animate `focus_distance` for rack focus.
 

@@ -50,3 +50,70 @@ pub fn to_rgb8(img: &Image, exposure: f32, view: View) -> Vec<u8> {
     }
     out
 }
+
+/// One linear RGB value -> display RGB 0..1 through `view`.
+pub fn display(c: [f32; 3], view: View) -> [f32; 3] {
+    match view {
+        View::Agx => agx(c),
+        View::Aces => c.map(|x| srgb_oetf(aces(x))),
+        View::Standard => c.map(|x| srgb_oetf(x.clamp(0.0, 1.0))),
+    }
+}
+
+pub fn srgb_to_linear(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+pub fn linear_to_srgb(x: f32) -> f32 {
+    srgb_oetf(x.clamp(0.0, 1.0))
+}
+
+/// Unpremultiplied display colour of the CG layer (black where there is no CG).
+pub fn cg_display(img: &Image, i: usize, exposure: f32, view: View) -> [f32; 3] {
+    let a = img.alpha[i];
+    if a <= 1e-4 {
+        return [0.0; 3];
+    }
+    let k = 2f32.powf(exposure) / a;
+    display([img.cg[i * 3] * k, img.cg[i * 3 + 1] * k, img.cg[i * 3 + 2] * k], view)
+}
+
+/// CG composited over an sRGB plate in display space, so plate pixels pass through untouched
+/// where there is no CG or shadow. Shadow catchers darken the plate in linear light; a roto
+/// `matte` (white = real foreground) puts the original plate back on top of everything.
+pub fn composite_rgb8(img: &Image, exposure: f32, view: View, plate: &[u8], matte: Option<&[u8]>) -> Vec<u8> {
+    let n = img.alpha.len();
+    let mut out = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        let a = img.alpha[i].clamp(0.0, 1.0);
+        let cg = cg_display(img, i, exposure, view);
+        let m = matte.map_or(0.0, |m| m[i] as f32 / 255.0);
+        for k in 0..3 {
+            let p = plate[i * 3 + k];
+            let shadowed = linear_to_srgb(srgb_to_linear(p) * img.shadow[i]);
+            let comp = cg[k] * a + shadowed * (1.0 - a);
+            let v = comp * (1.0 - m) + (p as f32 / 255.0) * m;
+            out.push((v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        }
+    }
+    out
+}
+
+/// Linear-light version of `composite_rgb8` for EXR output (alpha = 1).
+pub fn composite_linear(img: &Image, exposure: f32, plate: &[u8], matte: Option<&[u8]>) -> Vec<f32> {
+    let k = 2f32.powf(exposure);
+    let n = img.alpha.len();
+    let mut out = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        let a = img.alpha[i].clamp(0.0, 1.0);
+        let m = matte.map_or(0.0, |m| m[i] as f32 / 255.0);
+        for c in 0..3 {
+            let p = srgb_to_linear(plate[i * 3 + c]);
+            let comp = img.cg[i * 3 + c] * k + p * img.shadow[i] * (1.0 - a);
+            out.push(comp * (1.0 - m) + p * m);
+        }
+        out.push(1.0);
+    }
+    out
+}

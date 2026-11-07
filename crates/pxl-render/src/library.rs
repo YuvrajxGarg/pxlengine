@@ -58,6 +58,8 @@ pub struct MatDesc {
     pub uv_scale: [f32; 2],
     /// Scene material program id (0 = none).
     pub program: u32,
+    /// pxl_scene::Role code (0 surface, 1 shadow catcher, 2 holdout).
+    pub role: u32,
 }
 
 pub fn encode_material(m: &MatDesc) -> GpuMaterial {
@@ -68,8 +70,12 @@ pub fn encode_material(m: &MatDesc) -> GpuMaterial {
         i(m.tex[0]), i(m.tex[1]), i(m.tex[2]), i(m.tex[3]),
         i(m.normal_tex), i(m.rough_channel), i(m.metal_channel), i(m.alpha_mask as i32),
         m.normal_scale, m.alpha_cutoff, m.uv_scale[0], m.uv_scale[1],
-        m.base_alpha, f32::from_bits(m.program), 0.0, 0.0,
+        m.base_alpha, f32::from_bits(m.program), f32::from_bits(m.role), 0.0,
     ]
+}
+
+pub fn material_role(m: &GpuMaterial) -> u32 {
+    m[22].to_bits()
 }
 
 pub fn material_emission(m: &GpuMaterial) -> [f32; 3] {
@@ -154,7 +160,7 @@ impl Library {
         Ok(i)
     }
 
-    fn material_from_inputs(&mut self, m: &MaterialInputs, program: Option<&str>) -> Result<GpuMaterial> {
+    fn material_from_inputs(&mut self, m: &MaterialInputs, program: Option<&str>, role: u32) -> Result<GpuMaterial> {
         let program = match program {
             Some(name) => *self
                 .material_programs
@@ -191,6 +197,7 @@ impl Library {
             alpha_cutoff: 0.5,
             uv_scale: m.uv_scale,
             program,
+            role,
         }))
     }
 
@@ -236,6 +243,7 @@ impl Library {
                 alpha_cutoff: m.alpha_cutoff,
                 uv_scale: [1.0, 1.0],
                 program: 0,
+                role: 0,
             };
             let opaque = !m.alpha_mask;
             let mesh = self.add_mesh(format!("{}#p{pi}", path.display()), prim.mesh, opaque);
@@ -255,7 +263,7 @@ impl Library {
                 None => self.add_mesh(key, geometry::build(g), true),
             };
             let first = sim.materials.first().cloned().unwrap_or_default();
-            let material = self.material_from_inputs(&first.inputs, first.program.as_deref())?;
+            let material = self.material_from_inputs(&first.inputs, first.program.as_deref(), first.role.code())?;
             return Ok((mesh, material));
         }
         let file = sim.asset.as_deref().expect("validated: geometry or asset");
@@ -277,7 +285,7 @@ impl Library {
                         None => self.add_mesh(key, geometry::build(&m.geometry), true),
                     };
                     let first = m.materials.first().cloned().unwrap_or_default();
-                    let material = self.material_from_inputs(&first.inputs, first.program.as_deref()).with_context(|| {
+                    let material = self.material_from_inputs(&first.inputs, first.program.as_deref(), first.role.code()).with_context(|| {
                         format!("material of mesh '{}'", m.name.as_deref().unwrap_or("unnamed"))
                     })?;
                     out.push(Inst { object, mesh, material, xform: m.transform() });

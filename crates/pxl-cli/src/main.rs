@@ -7,6 +7,7 @@ use std::time::Instant;
 
 mod help;
 mod output;
+mod plate;
 
 #[derive(Parser)]
 #[command(name = "pxl", version, disable_help_subcommand = true, about = "pxlengine: headless 3D + VFX engine for agents. Start with `pxl help`.")]
@@ -43,6 +44,16 @@ enum Cmd {
         #[arg(long)]
         frame_end: Option<i32>,
     },
+    /// Write the scene camera, per frame, as a Nuke .chan track (for round trips and other tools).
+    Track {
+        scene: PathBuf,
+        #[arg(long, short)]
+        out: PathBuf,
+        #[arg(long)]
+        frame_start: Option<i32>,
+        #[arg(long)]
+        frame_end: Option<i32>,
+    },
     /// Print help topics (agent documentation).
     Help {
         /// Topic name, or `all` / `--all` for every topic.
@@ -75,6 +86,7 @@ fn run() -> Result<()> {
             println!("cache:   {}", pxl_gpu::slang::cache_dir().display());
             Ok(())
         }
+        Cmd::Track { scene, out, frame_start, frame_end } => export_track(&scene, &out, frame_start, frame_end),
         Cmd::Render { scene, out, profile: prof, passes, set, frame, frame_start, frame_end } => {
             let passes = passes.as_deref().map(output::Pass::parse_list).transpose()?.unwrap_or_default();
             render(&scene, &out, &prof, passes, &set, frame, frame_start, frame_end)
@@ -83,6 +95,42 @@ fn run() -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Load the camera's `.chan` track (if any) once, to apply to every evaluated scene.
+fn camera_track(scene: &Scene, base_dir: &Path) -> Result<Option<pxl_scene::track::CameraTrack>> {
+    match &scene.camera().track {
+        Some(f) => Ok(Some(pxl_scene::track::CameraTrack::load(&base_dir.join(f))?)),
+        None => Ok(None),
+    }
+}
+
+fn scene_at(scene: &Scene, track: Option<&pxl_scene::track::CameraTrack>, f: f64) -> Result<Scene> {
+    let mut s = scene.at_frame(f)?;
+    if let Some(t) = track {
+        t.apply(s.camera_mut(), f);
+    }
+    Ok(s)
+}
+
+fn export_track(scene_path: &Path, out: &Path, frame_start: Option<i32>, frame_end: Option<i32>) -> Result<()> {
+    let scene = Scene::load(scene_path)?;
+    let base_dir = scene_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let track = camera_track(&scene, &base_dir)?;
+    let range = scene.frame_range().unwrap_or((0, 0));
+    let (a, b) = (frame_start.unwrap_or(range.0), frame_end.unwrap_or(range.1));
+    let mut text = String::from("# pxl camera: frame tx ty tz rx ry rz vfov (degrees, rotation order ZXY)\n");
+    for f in a..=b {
+        let s = scene_at(&scene, track.as_ref(), f as f64)?;
+        text.push_str(&pxl_scene::track::CameraTrack::chan_line(s.camera(), f as f64));
+        text.push('\n');
+    }
+    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(out, text)?;
+    eprintln!("{} frames ({a}..{b}) -> {}", b - a + 1, out.display());
+    Ok(())
+}
+
 fn render(
     scene_path: &Path,
     out: &Path,
@@ -150,6 +198,8 @@ fn render(
     // the frame); samples are spread across them, so moving objects and cameras smear.
     let shutter = motion_blur.filter(|s| *s > 0.0);
     let subframe_count = if shutter.is_some() { opts.samples.clamp(1, 16) } else { 1 };
+    let base_dir = scene_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let track = camera_track(&scene, &base_dir)?;
     let mut frame_scenes: Vec<Vec<Scene>> = Vec::with_capacity(frames.len());
     for &f in &frames {
         let mut subs = Vec::with_capacity(subframe_count as usize);
@@ -158,7 +208,7 @@ fn render(
                 Some(sh) => f + ((k as f64 + 0.5) / subframe_count as f64 - 0.5) * sh as f64,
                 None => f,
             };
-            subs.push(scene.at_frame(t)?);
+            subs.push(scene_at(&scene, track.as_ref(), t)?);
         }
         frame_scenes.push(subs);
     }
@@ -167,15 +217,24 @@ fn render(
     if frame_scenes.iter().flatten().any(|s| s.render.resolution != [w, h]) {
         bail!("render.resolution cannot be animated");
     }
-    let films: Vec<output::Film> = frame_scenes
+    let mut films: Vec<output::Film> = frame_scenes
         .iter()
         .map(|subs| output::Film {
             exposure: exposure.unwrap_or(subs[0].render.exposure),
             view: subs[0].render.view,
             transparent: subs[0].render.transparent,
+            plate: None,
+            matte: None,
         })
         .collect();
-    let base_dir = scene_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut plates = match &first.plate {
+        Some(p) => Some((
+            plate::PlateReader::open(&base_dir.join(&p.file), w, h, false)?,
+            p.matte.as_ref().map(|m| plate::PlateReader::open(&base_dir.join(m), w, h, true)).transpose()?,
+            p.offset as i64,
+        )),
+        None => None,
+    };
 
     let programs = pxl_render::ProgramSet::from_scene(&frame_scenes[0][0], &base_dir)?;
     let mut renderer = Renderer::new(programs)?;
@@ -186,7 +245,14 @@ fn render(
     let mut last_stats = None;
     let mut denoised = false;
     let warnings = renderer.render_sequence(frame_scenes, &base_dir, &opts, |i, img, st| {
+        if let Some((reader, matte, offset)) = &mut plates {
+            let n = frames[i].round() as i64 + *offset;
+            films[i].plate = Some(reader.frame(n)?);
+            films[i].matte = matte.as_mut().map(|m| m.frame(n)).transpose()?;
+        }
         sink.write(frames[i] as i64, &img, &films[i])?;
+        films[i].plate = None;
+        films[i].matte = None;
         denoised = img.denoised;
         if multi {
             eprintln!(
@@ -194,7 +260,7 @@ fn render(
                 frames[i],
                 i + 1,
                 st.sim_ms + st.build_ms + st.render_ms + st.denoise_ms,
-                if st.sim_ms > 0.0 { format!(" (sim {:.0} ms)", st.sim_ms) } else { String::new() }
+                if st.sim_ms > 0.5 { format!(" (sim {:.0} ms)", st.sim_ms) } else { String::new() }
             );
         }
         last_stats = Some(st.clone());
@@ -210,7 +276,7 @@ fn render(
     if denoised {
         extras.push("denoised".to_string());
     }
-    if st.sim_ms > 0.0 {
+    if st.sim_ms > 0.5 {
         extras.push(format!("sim {:.0} ms + build {:.0} ms + trace {:.0} ms", st.sim_ms, st.build_ms, st.render_ms));
     }
     if let Some(sh) = shutter {

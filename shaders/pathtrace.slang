@@ -48,7 +48,7 @@ struct Push { uint sample_index; uint p0; uint p1; uint p2; };
 [[vk::binding(12, 0)]] StructuredBuffer<float> env_marg;      // height + 1
 [[vk::binding(13, 0)]] StructuredBuffer<float> env_cond;      // height * (width + 1)
 [[vk::binding(14, 0)]] StructuredBuffer<Frame> frames;
-[[vk::binding(15, 0)]] RWStructuredBuffer<float4> aux;         // 3 per pixel: (albedo, alpha) (normal, depth) (object id)
+[[vk::binding(15, 0)]] RWStructuredBuffer<float4> aux;         // 4 per pixel: (albedo, alpha) (normal, depth) (background, catcher) (object id, shadow lit, shadow unoccluded, -)
 [[vk::binding(17, 0)]] StructuredBuffer<float4> params;        // scene program params, one float4 each
 [[vk::push_constant]] ConstantBuffer<Push> pc;
 
@@ -158,10 +158,16 @@ Hit trace_segment(float3 o, float3 d, float tmax) {
     return h;
 }
 
-bool visible(float3 o, float3 d, float tmax) {
+// Instance masks: 0x01 = CG surfaces, 0x02 = proxies of the real world (catchers, holdouts).
+static const uint MASK_ALL = 0xff;
+static const uint MASK_CG = 0x01;
+
+bool visible(float3 o, float3 d, float tmax) { return visible_mask(o, d, tmax, MASK_ALL); }
+
+bool visible_mask(float3 o, float3 d, float tmax, uint mask) {
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
     RayDesc r; r.Origin = o; r.Direction = d; r.TMin = 0.0; r.TMax = tmax;
-    q.TraceRayInline(tlas, RAY_FLAG_NONE, 0xff, r);
+    q.TraceRayInline(tlas, RAY_FLAG_NONE, mask, r);
     while (q.Proceed()) {
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE &&
             alpha_pass(q.CandidateInstanceID(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
@@ -350,6 +356,14 @@ float emissive_pdf(uint i, float dist, float cl) {
 
 // ---------------------------------------------------------------- next-event estimation
 float3 direct_light(Surface s, float3 v, inout uint rng) {
+    float3 unoccluded = 0;
+    return direct_light_ex(s, v, rng, MASK_ALL, false, unoccluded);
+}
+
+/// One light sample. Returns the shadowed contribution; adds the same sample without any
+/// occlusion to `unoccluded`. Shadow rays only test instances in `mask`. `nee_only` drops the
+/// MIS weight (for shadow catchers, which don't continue the path).
+float3 direct_light_ex(Surface s, float3 v, inout uint rng, uint mask, bool nee_only, inout float3 unoccluded) {
     float pa = F.envp.z, pe = F.envp.w, pv = F.envq.x;
     float r = rnd(rng);
     float3 o = offset_ray(s.p, s.ng);
@@ -362,8 +376,10 @@ float3 direct_light(Surface s, float3 v, inout uint rng) {
         if (type == 2) {
             float3 l = -L.u.xyz;
             float3 f = eval_brdf(s, v, l);
-            if (any(f > 0) && visible(o, l, 1e30)) return L.radiance.rgb * f * dot(s.n, l) * weight;
-            return 0;
+            if (all(f <= 0)) return 0;
+            float3 c = L.radiance.rgb * f * dot(s.n, l) * weight;
+            unoccluded += c;
+            return visible_mask(o, l, 1e30, mask) ? c : float3(0);
         }
         float3 lp = L.pos_type.xyz;
         if (type == 1) lp += L.u.xyz * (2 * rnd(rng) - 1) + L.v.xyz * (2 * rnd(rng) - 1);
@@ -379,19 +395,20 @@ float3 direct_light(Surface s, float3 v, inout uint rng) {
             area_term = cl * 4 * length(L.u.xyz) * length(L.v.xyz);
         }
         float3 f = eval_brdf(s, v, l);
-        if (any(f > 0) && visible(o, l, dist * 0.999))
-            return L.radiance.rgb * area_term / d2 * f * dot(s.n, l) * weight;
-        return 0;
+        if (all(f <= 0)) return 0;
+        float3 c = L.radiance.rgb * area_term / d2 * f * dot(s.n, l) * weight;
+        unoccluded += c;
+        return visible_mask(o, l, dist * 0.999, mask) ? c : float3(0);
     }
 
     if (r < pa + pe) {                                // emissive triangles
         uint i = search_emissive(F.misc.y, rnd(rng));
-        float4 a = emissive[i * 4], b = emissive[i * 4 + 1], c = emissive[i * 4 + 2], e = emissive[i * 4 + 3];
+        float4 a = emissive[i * 4], b = emissive[i * 4 + 1], c4 = emissive[i * 4 + 2], e = emissive[i * 4 + 3];
         float su = sqrt(rnd(rng)), u2 = rnd(rng);
         float b0 = 1 - su, b1 = u2 * su, b2 = 1 - b0 - b1;
-        float3 x = a.xyz * b0 + b.xyz * b1 + c.xyz * b2;
-        float2 uv = float2(a.w, b.w) * b0 + float2(c.w, e.x) * b1 + float2(e.y, e.z) * b2;
-        float3 nl = normalize(cross(b.xyz - a.xyz, c.xyz - a.xyz));
+        float3 x = a.xyz * b0 + b.xyz * b1 + c4.xyz * b2;
+        float2 uv = float2(a.w, b.w) * b0 + float2(c4.w, e.x) * b1 + float2(e.y, e.z) * b2;
+        float3 nl = normalize(cross(b.xyz - a.xyz, c4.xyz - a.xyz));
         float3 dl = x - o;
         float dist = length(dl);
         if (dist < 1e-6) return 0;
@@ -400,9 +417,11 @@ float3 direct_light(Surface s, float3 v, inout uint rng) {
         if (cl < 1e-6) return 0;
         float pdf_l = emissive_pdf(i, dist, cl);
         float3 f = eval_brdf(s, v, l);
-        if (all(f <= 0) || !visible(o, l, dist * (1 - 1e-3))) return 0;
-        float3 Le = emissive_radiance(asuint(e.w), uv);
-        return Le * f * dot(s.n, l) * mis(pdf_l, pdf_brdf(s, v, l)) / pdf_l;
+        if (all(f <= 0)) return 0;
+        float w = nee_only ? 1.0 : mis(pdf_l, pdf_brdf(s, v, l));
+        float3 c = emissive_radiance(asuint(e.w), uv) * f * dot(s.n, l) * w / pdf_l;
+        unoccluded += c;
+        return visible_mask(o, l, dist * (1 - 1e-3), mask) ? c : float3(0);
     }
 
     if (pv > 0) {                                     // HDRI environment
@@ -414,8 +433,11 @@ float3 direct_light(Surface s, float3 v, inout uint rng) {
         float pdf_l = pv * env_pdf(l);
         if (pdf_l <= 0) return 0;
         float3 f = eval_brdf(s, v, l);
-        if (all(f <= 0) || !visible(o, l, 1e30)) return 0;
-        return env_radiance(l) * f * dot(s.n, l) * mis(pdf_l, pdf_brdf(s, v, l)) / pdf_l;
+        if (all(f <= 0)) return 0;
+        float wt = nee_only ? 1.0 : mis(pdf_l, pdf_brdf(s, v, l));
+        float3 c = env_radiance(l) * f * dot(s.n, l) * wt / pdf_l;
+        unoccluded += c;
+        return visible_mask(o, l, 1e30, mask) ? c : float3(0);
     }
     return 0;
 }
@@ -476,6 +498,8 @@ SurfaceIn surface_input(Hit h, float3 d, Surface s) {
 }
 
 uint material_program(Hit h) { return asuint(materials[instances[h.inst].meta.z].p1.y); }
+/// 0 = surface, 1 = shadow catcher, 2 = holdout.
+uint material_role(Hit h) { return asuint(materials[instances[h.inst].meta.z].p1.z); }
 
 // Film pass resources: declared always so any program file compiles in any scene; only the
 // film pass (PXL_HOOK_FILM) binds them.
@@ -559,6 +583,8 @@ void main(uint3 id: SV_DispatchThreadID) {
     float4 aov0 = float4(0), aov1 = float4(0);
     uint object_id = NONE;
     float3 radiance = 0, thr = 1;
+    float3 background = 0;          // what the camera sees "behind" CG: env on misses/proxies
+    float catcher = 0, shadow_o = 0, shadow_u = 0, hit_any = 0;
 
 #ifdef PXL_HOOK_CAMERA
     {
@@ -595,7 +621,11 @@ void main(uint3 id: SV_DispatchThreadID) {
 #endif
         if (!h.hit) {
             float3 Le = env_radiance(d);
-            if (bounce == 0) aov0 = float4(saturate(Le), 0);
+            if (bounce == 0) {
+                aov0 = float4(saturate(Le), 0);
+                background += thr * Le;
+                break;
+            }
             float w = (prev_pdf > 0 && has_env() && F.envq.x > 0) ? mis(prev_pdf, F.envq.x * env_pdf(d)) : 1.0;
             float3 c = thr * Le * w;
             radiance += bounce > 1 ? min(c, float3(clamp_v)) : c;
@@ -612,9 +642,31 @@ void main(uint3 id: SV_DispatchThreadID) {
             if (dot(s.n, s.ng) < 0) s.n = normalize(s.n - s.ng * (dot(s.n, s.ng) - 1e-3));
         }
         if (bounce == 0) {
+            hit_any = 1;
             aov0 = float4(s.base, 1);
             aov1 = float4(s.n, dot(s.p - F.cam_pos.xyz, F.cam_fwd.xyz));
             object_id = asuint(instances[h.inst].n0.w);
+            uint role = material_role(h);
+            if (role != 0) {
+                // A proxy of something real: the camera sees the plate/background here, not CG.
+                float3 Le = env_radiance(d);
+                aov0 = float4(saturate(Le), 0);
+                background += thr * Le;
+                if (role == 1) {
+                    // Shadow catcher: ratio of light reaching it with and without CG occluders.
+                    catcher = 1;
+                    float3 unocc = 0;
+                    float3 occ = direct_light_ex(s, v, rng, MASK_CG, true, unocc);
+                    float3 tb, bb; basis(s.n, tb, bb);
+                    float u1 = rnd(rng), u2 = rnd(rng);
+                    float rr = sqrt(u1), ph = 2 * PI * u2;
+                    float3 l = normalize(tb * (rr * cos(ph)) + bb * (rr * sin(ph)) + s.n * sqrt(max(0, 1 - u1)));
+                    float3 sky = env_radiance(l) * s.base;          // cosine-sampled ambient
+                    shadow_u = lum(unocc + sky);
+                    shadow_o = lum(occ + (visible_mask(offset_ray(s.p, s.ng), l, 1e30, MASK_CG) ? sky : float3(0)));
+                }
+                break;
+            }
         }
 
         if (any(s.emission > 0)) {
@@ -644,11 +696,14 @@ void main(uint3 id: SV_DispatchThreadID) {
         d = l;
     }
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = 0;
+    if (any(isnan(background)) || any(isinf(background))) background = 0;
     bool first = pc.sample_index == 0;
     accum[idx] = (first ? float4(0) : accum[idx]) + float4(radiance, 1);
-    aux[idx * 3] = (first ? float4(0) : aux[idx * 3]) + aov0;
-    aux[idx * 3 + 1] = (first ? float4(0) : aux[idx * 3 + 1]) + aov1;
-    if (first) aux[idx * 3 + 2] = float4(asfloat(object_id), 0, 0, 0);
+    aux[idx * 4] = (first ? float4(0) : aux[idx * 4]) + aov0;
+    aux[idx * 4 + 1] = (first ? float4(0) : aux[idx * 4 + 1]) + aov1;
+    aux[idx * 4 + 2] = (first ? float4(0) : aux[idx * 4 + 2]) + float4(background, catcher);
+    float4 a3 = first ? float4(asfloat(object_id), 0, 0, 0) : aux[idx * 4 + 3];
+    aux[idx * 4 + 3] = float4(a3.x, a3.y + shadow_o, a3.z + shadow_u, a3.w + hit_any);
 }
 
 // ---------------------------------------------------------------- film program pass

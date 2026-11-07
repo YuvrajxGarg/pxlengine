@@ -47,10 +47,11 @@ pub enum Pass {
     Depth,
     Alpha,
     Object,
+    Shadow,
 }
 
 impl Pass {
-    pub const ALL: [Pass; 5] = [Pass::Albedo, Pass::Normal, Pass::Depth, Pass::Alpha, Pass::Object];
+    pub const ALL: [Pass; 6] = [Pass::Albedo, Pass::Normal, Pass::Depth, Pass::Alpha, Pass::Object, Pass::Shadow];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -59,6 +60,7 @@ impl Pass {
             Pass::Depth => "depth",
             Pass::Alpha => "alpha",
             Pass::Object => "object",
+            Pass::Shadow => "shadow",
         }
     }
 
@@ -72,7 +74,7 @@ impl Pass {
             let p = Pass::ALL
                 .iter()
                 .find(|p| p.name() == x)
-                .with_context(|| format!("unknown pass '{x}' (albedo, normal, depth, alpha, object, all)"))?;
+                .with_context(|| format!("unknown pass '{x}' (albedo, normal, depth, alpha, object, shadow, all)"))?;
             out.push(*p);
         }
         let mut uniq = Vec::new();
@@ -97,6 +99,9 @@ pub struct Film {
     pub exposure: f32,
     pub view: View,
     pub transparent: bool,
+    /// Plate frame (RGB8 at render size) and optional roto matte (one byte per pixel).
+    pub plate: Option<Vec<u8>>,
+    pub matte: Option<Vec<u8>>,
 }
 
 pub struct Sink {
@@ -141,7 +146,7 @@ pub fn ffmpeg_status() -> String {
     }
 }
 
-fn numbered(pattern: &Path, frame: i64) -> PathBuf {
+pub(crate) fn numbered(pattern: &Path, frame: i64) -> PathBuf {
     let s = pattern.to_string_lossy();
     let Some(end) = s.rfind('#').map(|e| e + 1) else { return pattern.to_path_buf() };
     let start = s[..end].trim_end_matches('#').len();
@@ -241,32 +246,44 @@ impl Sink {
         let k = 2f32.powf(f.exposure);
         match self.kind.format {
             Format::Png => {
-                let rgb = film::to_rgb8(img, f.exposure, f.view);
-                if f.transparent {
-                    let data: Vec<u8> = rgb
-                        .chunks_exact(3)
-                        .zip(&img.alpha)
-                        .flat_map(|(c, a)| [c[0], c[1], c[2], (a.clamp(0.0, 1.0) * 255.0 + 0.5) as u8])
+                if let Some(plate) = &f.plate {
+                    let rgb = film::composite_rgb8(img, f.exposure, f.view, plate, f.matte.as_deref());
+                    write_png(&main, w, h, &rgb, png::ColorType::Rgb)?;
+                } else if f.transparent {
+                    // CG layer only (unpremultiplied colour + coverage); shadows go to the shadow pass.
+                    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    let data: Vec<u8> = (0..img.alpha.len())
+                        .flat_map(|i| {
+                            let c = film::cg_display(img, i, f.exposure, f.view);
+                            [q(c[0]), q(c[1]), q(c[2]), q(img.alpha[i])]
+                        })
                         .collect();
                     write_png(&main, w, h, &data, png::ColorType::Rgba)?;
                 } else {
+                    let rgb = film::to_rgb8(img, f.exposure, f.view);
                     write_png(&main, w, h, &rgb, png::ColorType::Rgb)?;
                 }
                 self.written.push(main.clone());
             }
             Format::Exr => {
                 // Scene-linear (no view transform), exposure applied, alpha = coverage.
-                let data = img
-                    .rgb
-                    .chunks_exact(3)
-                    .zip(&img.alpha)
-                    .flat_map(|(c, a)| [c[0] * k, c[1] * k, c[2] * k, *a])
-                    .collect();
+                let data = match &f.plate {
+                    Some(plate) => film::composite_linear(img, f.exposure, plate, f.matte.as_deref()),
+                    None => img
+                        .rgb
+                        .chunks_exact(3)
+                        .zip(&img.alpha)
+                        .flat_map(|(c, a)| [c[0] * k, c[1] * k, c[2] * k, *a])
+                        .collect(),
+                };
                 write_exr(&main, w, h, data)?;
                 self.written.push(main.clone());
             }
             Format::Video => {
-                let rgb = film::to_rgb8(img, f.exposure, f.view);
+                let rgb = match &f.plate {
+                    Some(plate) => film::composite_rgb8(img, f.exposure, f.view, plate, f.matte.as_deref()),
+                    None => film::to_rgb8(img, f.exposure, f.view),
+                };
                 let child = self.video.as_mut().expect("video sink");
                 child.stdin.as_mut().unwrap().write_all(&rgb).context("ffmpeg stopped accepting frames")?;
             }
@@ -280,6 +297,11 @@ impl Sink {
                 Pass::Albedo if exr => write_exr(&path, w, h, img.albedo.chunks_exact(3).flat_map(|c| rgba(c, 1.0)).collect())?,
                 Pass::Normal if exr => write_exr(&path, w, h, img.normal.chunks_exact(3).flat_map(|c| rgba(c, 1.0)).collect())?,
                 Pass::Alpha if exr => write_exr(&path, w, h, img.alpha.iter().flat_map(|&a| [a, a, a, 1.0]).collect())?,
+                Pass::Shadow if exr => write_exr(&path, w, h, img.shadow.iter().flat_map(|&a| [a, a, a, 1.0]).collect())?,
+                Pass::Shadow => {
+                    let d: Vec<u8> = img.shadow.iter().map(|&a| (a.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect();
+                    write_png(&path, w, h, &d, png::ColorType::Grayscale)?;
+                }
                 Pass::Albedo => {
                     let d: Vec<u8> = img.albedo.iter().map(|&x| (srgb(x) * 255.0 + 0.5) as u8).collect();
                     write_png(&path, w, h, &d, png::ColorType::Rgb)?;

@@ -1,0 +1,17 @@
+{"version":1,
+"programs":{"source":"../programs/showcase.slang",
+  "params":{"marble_scale":2.5,"lava_glow":8,"tile_size":1.0,"aberration":0,"vignette":0,"grain":0,"fisheye_fov":180}},
+"nodes":[
+  {"type":"mesh","name":"courtyard","geometry":{"std":"grid","size":[60,60]},"materials":[{"program":"tiles"}]},
+  {"type":"mesh","name":"crate","translation":[-1.5,0.5,-0.6],"rotation":[0,20,0],"geometry":{"std":"box","size":[1,1,1]},
+   "materials":[{"inputs":{"base_color":[0.55,0.33,0.16],"specular_roughness":0.75}}]},
+  {"type":"mesh","name":"pillar","translation":[1.0,1.25,1.2],"geometry":{"std":"cylinder","radius":0.22,"height":2.5},
+   "materials":[{"inputs":{"base_color":[0.7,0.7,0.68],"specular_roughness":0.6}}]},
+  {"type":"camera","name":"cam","translation":[-3.5,1.5,5],"target":[0,0.6,-0.3],"fov":40}
+],
+"world":{"hdri":"../../assets/kloofendal_48d_partly_cloudy_puresky_2k.hdr","strength":1,"rotation":30},
+"render":{"resolution":[960,540]},
+"animation":{"frame_end":47,"tracks":[
+  {"node":"cam","path":"translation","interp":"smooth","keys":[[0,[-3.5,1.5,5]],[47,[3.2,1.9,4.4]]]},
+  {"node":"cam","path":"target","interp":"smooth","keys":[[0,[0,0.6,-0.3]],[47,[0.4,0.6,-0.5]]]}
+]}}

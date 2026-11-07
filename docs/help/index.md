@@ -10,6 +10,7 @@ Write a scene as JSON, render it, look at the image, revise. No editor.
     pxl help render   # profiles, --set overrides, output
     pxl help programs # your own Slang: materials, lenses, bent light, film looks
     pxl help simulations  # millions of GPU agents: flocks, swarms, particles
+    pxl help vfx      # CG over real footage: plates, tracked cameras, shadow catchers
     pxl info          # which GPU is used
 
 ## First scene

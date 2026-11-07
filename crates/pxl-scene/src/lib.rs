@@ -3,6 +3,7 @@
 
 pub mod anim;
 pub mod geometry;
+pub mod track;
 
 use anyhow::{bail, Context, Result};
 use glam::{EulerRot, Mat4, Quat, Vec3};
@@ -30,12 +31,32 @@ pub struct Scene {
     pub programs: Option<Programs>,
     #[serde(default)]
     pub simulations: Vec<Simulation>,
+    /// Background footage the render is composited over.
+    #[serde(default)]
+    pub plate: Option<Plate>,
     /// The JSON this scene was parsed from; animation tracks are applied to it per frame.
     #[serde(skip)]
     raw: Value,
     /// Frame this scene was evaluated at (0 for a static scene).
     #[serde(skip)]
     pub frame: f64,
+}
+
+/// Footage (or a still) that CG is composited over. Frame `f` of the scene uses plate frame
+/// `f + offset`. Shadow catchers darken it, holdouts and the `matte` reveal it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Plate {
+    /// Video (.mp4/.mov/...), image sequence with a `#` run (plate_####.png) or a single image.
+    pub file: String,
+    #[serde(default)]
+    pub offset: i32,
+    /// Optional roto matte sequence/image: white = real foreground in front of all CG.
+    #[serde(default)]
+    pub matte: Option<String>,
+    /// Shadow strength on the plate (0 = no shadows, 1 = physically matched).
+    #[serde(default = "one")]
+    pub shadow: f32,
 }
 
 /// A population of GPU agents stepped by scene programs and drawn as instances of one mesh.
@@ -263,6 +284,32 @@ pub struct Material {
     /// Name of a material function in `programs` that edits the surface after inputs/textures.
     #[serde(default)]
     pub program: Option<String>,
+    /// How the camera sees this surface when compositing over a plate / background.
+    #[serde(default)]
+    pub role: Role,
+}
+
+/// Material roles for VFX: proxies of real-world things in the plate.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Ordinary CG surface.
+    #[default]
+    Surface,
+    /// Invisible to the camera, but CG shadows on it darken the plate (ground, walls).
+    ShadowCatcher,
+    /// Invisible to the camera and cuts CG behind it out (a real object in front of CG).
+    Holdout,
+}
+
+impl Role {
+    pub fn code(self) -> u32 {
+        match self {
+            Role::Surface => 0,
+            Role::ShadowCatcher => 1,
+            Role::Holdout => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -372,6 +419,14 @@ pub struct CameraNode {
     pub focus_distance: Option<f32>,
     #[serde(default)]
     pub focus_target: Option<[f32; 3]>,
+    /// Euler rotation in degrees [rx, ry, rz], applied Z first, then X, then Y (Nuke/Maya
+    /// "ZXY"). Looks down -Z with +Y up. Overrides `target` when given.
+    #[serde(default)]
+    pub rotation: Option<[f32; 3]>,
+    /// Camera track (.chan: frame tx ty tz rx ry rz [vertical fov]) driving translation,
+    /// rotation and fov per frame. Relative to the scene file.
+    #[serde(default)]
+    pub track: Option<String>,
 }
 
 /// Full-frame sensor height (36x24 mm) used to turn fov + fstop into a physical aperture.
@@ -379,12 +434,38 @@ pub const SENSOR_HEIGHT_M: f32 = 0.024;
 
 impl CameraNode {
     /// (aperture radius m, focus distance m); radius 0 = pinhole.
-    pub fn lens(&self) -> (f32, f32) {
+    /// Camera rotation for `rotation` = [rx, ry, rz] degrees in "ZXY" order (Z applied first).
+    pub fn rotation_quat(r_deg: [f32; 3]) -> glam::Quat {
+        let [rx, ry, rz] = r_deg.map(f32::to_radians);
+        Quat::from_euler(EulerRot::YXZ, ry, rx, rz)
+    }
+
+    /// Inverse of `rotation_quat`.
+    pub fn rotation_degrees(q: glam::Quat) -> [f32; 3] {
+        let (ry, rx, rz) = q.to_euler(EulerRot::YXZ);
+        [rx.to_degrees(), ry.to_degrees(), rz.to_degrees()]
+    }
+
+    /// (eye, forward, right, up), all unit vectors except eye.
+    pub fn basis(&self) -> (Vec3, Vec3, Vec3, Vec3) {
         let eye = Vec3::from(self.translation);
+        if let Some(r) = self.rotation {
+            let q = Self::rotation_quat(r);
+            return (eye, q * Vec3::NEG_Z, q * Vec3::X, q * Vec3::Y);
+        }
         let fwd = (Vec3::from(self.target) - eye).try_normalize().unwrap_or(Vec3::NEG_Z);
+        let world_up = if fwd.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
+        let right = fwd.cross(world_up).normalize();
+        let up = right.cross(fwd);
+        (eye, fwd, right, up)
+    }
+
+    pub fn lens(&self) -> (f32, f32) {
+        let (eye, fwd, _, _) = self.basis();
         let focus = self.focus_distance.unwrap_or_else(|| {
             let t = Vec3::from(self.focus_target.unwrap_or(self.target));
-            (t - eye).dot(fwd).max(1e-3)
+            let d = (t - eye).dot(fwd);
+            if d > 1e-3 { d } else { 10.0 }
         });
         match self.fstop {
             Some(n) if n > 0.0 => {
@@ -576,6 +657,16 @@ impl Scene {
     /// Inclusive frame range of the animation, if any.
     pub fn frame_range(&self) -> Option<(i32, i32)> {
         self.animation.as_ref().map(|a| (a.frame_start, a.end()))
+    }
+
+    pub fn camera_mut(&mut self) -> &mut CameraNode {
+        self.nodes
+            .iter_mut()
+            .find_map(|n| match n {
+                Node::Camera(c) => Some(c),
+                _ => None,
+            })
+            .expect("validated")
     }
 
     pub fn camera(&self) -> &CameraNode {
