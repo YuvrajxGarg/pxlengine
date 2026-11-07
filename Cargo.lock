@@ -942,6 +942,7 @@ dependencies = [
  "pxl-denoise",
  "pxl-gpu",
  "pxl-scene",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,24 @@
+{"version":1,
+"programs":{
+  "source":"programs/black_hole.slang",
+  "propagate":"black_hole",
+  "params":{"center":[0,0,0],"rs":1,"disk_inner":3,"disk_outer":10,
+            "disk_brightness":1.6,"disk_opacity":2.5,"disk_speed":0.6,
+            "star_density":0.025,"escape":60}
+},
+"nodes":[
+  {"type":"mesh","name":"station ring","translation":[1.8,1.9,11],"rotation":[70,20,0],
+   "geometry":{"std":"torus","radius":0.7,"tube":0.09},
+   "materials":[{"inputs":{"base_color":[0.75,0.75,0.78],"base_metalness":1,"specular_roughness":0.25}}]},
+  {"type":"mesh","name":"station hub","translation":[1.8,1.9,11],"rotation":[70,20,0],
+   "geometry":{"std":"cylinder","radius":0.22,"height":0.9},
+   "materials":[{"inputs":{"base_color":[0.3,0.3,0.32],"base_metalness":1,"specular_roughness":0.35}}]},
+  {"type":"light","name":"key","shape":"directional","translation":[0,0,0],"target":[1.8,1.9,11],"energy":1.5,"color":[1,0.8,0.6]},
+  {"type":"camera","name":"cam","translation":[0,0.9,19],"target":[0,0,0],"fov":38}
+],
+"world":{"color":[0,0,0]},
+"render":{"resolution":[1280,720],"bounces":3,"view":"agx"},
+"animation":{"frame_end":95,"tracks":[
+  {"node":"cam","path":"translation","interp":"smooth","keys":[[0,[-3,0.7,19]],[95,[3,1.3,18.5]]]},
+  {"node":"station ring","path":"rotation","keys":[[0,[70,20,0]],[95,[70,20,90]]]}
+]}}

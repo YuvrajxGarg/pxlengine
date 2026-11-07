@@ -33,7 +33,8 @@ cargo build --release
 - `docs/help/` — agent-facing help topics (embedded)
 - `docs/ROADMAP.md` — phased plan and known gaps
 
-Status: phases 1-3 complete (GPU path tracer; glTF/texture/HDRI import, animation, video;
-OIDN denoising, depth of field, motion blur, compositing passes, EXR).
+Status: phases 1-4 complete (GPU path tracer; glTF/texture/HDRI import, animation, video;
+OIDN denoising, depth of field, motion blur, compositing passes, EXR; scene Slang programs
+for materials, cameras, light propagation and film - see `examples/black-hole.json`).
 See the roadmap. Test assets: `sh scripts/fetch-test-assets.sh` (Khronos + Poly Haven).
 Denoiser: `sh scripts/fetch-oidn.sh` (Intel Open Image Denoise into `vendor/oidn`).

@@ -1,0 +1,28 @@
+{"version":1,
+"programs":{
+  "source":"programs/showcase.slang",
+  "film":"lens_finish",
+  "params":{"marble_scale":2.5,"lava_glow":8,"tile_size":1.5,
+            "aberration":0.004,"vignette":0.7,"grain":0.08,"fisheye_fov":170}
+},
+"nodes":[
+  {"type":"mesh","name":"floor","geometry":{"std":"grid","size":[30,30]},
+   "materials":[{"program":"tiles"}]},
+  {"type":"mesh","name":"marble bust","translation":[-1.3,0.8,0],"rotation":[0,30,0],
+   "geometry":{"std":"sphere","radius":0.8},
+   "materials":[{"program":"marble"}]},
+  {"type":"mesh","name":"marble plinth","translation":[-1.3,0,0],"rotation":[0,30,0],
+   "geometry":{"std":"box","size":[1.2,0.1,1.2]},
+   "materials":[{"program":"marble"}]},
+  {"type":"mesh","name":"lava rock","translation":[1.3,0.75,0.2],"rotation":[20,0,10],
+   "geometry":{"std":"torus","radius":0.55,"tube":0.3},
+   "materials":[{"program":"lava","inputs":{"base_color":[1,1,1]}}]},
+  {"type":"light","shape":"rectangle","translation":[-3,5,4],"target":[0,0.5,0],"energy":500,"size":[3,2]},
+  {"type":"camera","name":"cam","translation":[0,1.7,5.2],"target":[0,0.6,0],"fov":38}
+],
+"world":{"hdri":"../assets/studio_small_09_2k.hdr","strength":0.25},
+"render":{"resolution":[1280,720]},
+"animation":{"frame_end":71,"tracks":[
+  {"node":"lava rock","path":"rotation","keys":[[0,[20,0,10]],[71,[20,120,10]]]},
+  {"node":"marble bust","path":"rotation","keys":[[0,[0,30,0]],[71,[0,-60,0]]]}
+]}}

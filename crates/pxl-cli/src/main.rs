@@ -70,7 +70,7 @@ fn run() -> Result<()> {
             println!("slangc:  {}", pxl_gpu::slang::find_slangc().map(|p| p.display().to_string()).unwrap_or_else(|e| e.to_string()));
             println!("ffmpeg:  {}", output::ffmpeg_status());
             drop(ctx);
-            let mut r = Renderer::new()?;
+            let mut r = Renderer::new(pxl_render::ProgramSet::none())?;
             println!("denoise: {}", r.denoiser_status());
             println!("cache:   {}", pxl_gpu::slang::cache_dir().display());
             Ok(())
@@ -177,7 +177,8 @@ fn render(
         .collect();
     let base_dir = scene_path.parent().map(Path::to_path_buf).unwrap_or_default();
 
-    let mut renderer = Renderer::new()?;
+    let programs = pxl_render::ProgramSet::from_scene(&frame_scenes[0][0], &base_dir)?;
+    let mut renderer = Renderer::new(programs)?;
     let device = renderer.ctx.info.name.clone();
     let mut sink = output::Sink::open(kind, out, w, h, first.render.fps, passes)?;
     let total = frames.len();

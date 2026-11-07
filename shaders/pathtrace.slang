@@ -29,7 +29,7 @@ struct Frame {
     uint4 misc;          // seed, emissive triangle count, env width, env height
     float4 envp;         // env rotation (turns), env weight total, P(analytic), P(emissive)
     float4 envq;         // P(env), indirect clamp
-    float4 lens;         // aperture radius (m), focus distance (m)
+    float4 lens;         // aperture radius (m), focus distance (m), time (s), frame
 };
 struct Push { uint sample_index; uint p0; uint p1; uint p2; };
 
@@ -49,6 +49,7 @@ struct Push { uint sample_index; uint p0; uint p1; uint p2; };
 [[vk::binding(13, 0)]] StructuredBuffer<float> env_cond;      // height * (width + 1)
 [[vk::binding(14, 0)]] StructuredBuffer<Frame> frames;
 [[vk::binding(15, 0)]] RWStructuredBuffer<float4> aux;         // 3 per pixel: (albedo, alpha) (normal, depth) (object id)
+[[vk::binding(17, 0)]] StructuredBuffer<float4> params;        // scene program params, one float4 each
 [[vk::push_constant]] ConstantBuffer<Push> pc;
 
 static Frame F;
@@ -133,9 +134,12 @@ bool alpha_pass(uint inst_id, uint prim, float2 bc) {
 
 struct Hit { bool hit; uint inst; uint prim; float2 bc; float t; float3x4 o2w; };
 
-Hit trace(float3 o, float3 d) {
+Hit trace(float3 o, float3 d) { return trace_segment(o, d, 1e30); }
+
+/// Closest hit along o + t*d for t in [0, tmax]. Programs use this to march curved rays.
+Hit trace_segment(float3 o, float3 d, float tmax) {
     RayQuery<RAY_FLAG_NONE> q;
-    RayDesc r; r.Origin = o; r.Direction = d; r.TMin = 0.0; r.TMax = 1e30;
+    RayDesc r; r.Origin = o; r.Direction = d; r.TMin = 0.0; r.TMax = tmax;
     q.TraceRayInline(tlas, RAY_FLAG_NONE, 0xff, r);
     while (q.Proceed()) {
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE &&
@@ -414,16 +418,90 @@ float3 direct_light(Surface s, float3 v, inout uint rng) {
     return 0;
 }
 
+// ---------------------------------------------------------------- program interface
+// Types and helpers available to scene programs (see `pxl help programs`).
+
+struct Ray { float3 origin; float3 dir; };
+
+struct CameraIn {
+    float2 ndc;            // -1..1, +y up
+    float2 pixel;          // pixel coordinate (with sub-pixel jitter)
+    float2 resolution;
+    float3 position;       // camera position
+    float3 forward;        // unit vectors
+    float3 right;
+    float3 up;
+    float tan_half_fov;    // vertical
+    float aspect;
+};
+
+struct SurfaceIn {
+    float3 position;       // world space
+    float3 object_position;// object space: procedural patterns stick to moving objects
+    float3 geometric_normal;
+    float2 uv;
+    float3 view_dir;       // towards the viewer
+    uint object;           // scene node index
+};
+
+struct FilmIn {
+    float3 color;          // linear HDR (after denoising)
+    float alpha;
+    uint2 pixel;
+    uint2 resolution;
+    float3 normal;
+    float depth;
+    float3 albedo;
+};
+
+float time() { return F.lens.z; }
+Hit no_hit() { Hit h; h.hit = false; h.inst = 0; h.prim = 0; h.bc = 0; h.t = 0; h.o2w = float3x4(0); return h; }
+float frame_number() { return F.lens.w; }
+
+SurfaceIn surface_input(Hit h, float3 d, Surface s) {
+    Instance inst = instances[h.inst];
+    Tri t = load_tri(inst, h.prim);
+    float w0 = 1 - h.bc.x - h.bc.y;
+    SurfaceIn i;
+    i.position = s.p;
+    i.object_position = t.p0 * w0 + t.p1 * h.bc.x + t.p2 * h.bc.y;
+    i.geometric_normal = s.ng;
+    i.uv = t.uv0 * w0 + t.uv1 * h.bc.x + t.uv2 * h.bc.y;
+    i.view_dir = -d;
+    i.object = asuint(inst.n0.w);
+    return i;
+}
+
+uint material_program(Hit h) { return asuint(materials[instances[h.inst].meta.z].p1.y); }
+
+// Film pass resources: declared always so any program file compiles in any scene; only the
+// film pass (PXL_HOOK_FILM) binds them.
+[[vk::binding(16, 0)]] StructuredBuffer<float4> film_in;     // 3 per pixel: (color, alpha) (normal, depth) (albedo, -)
+[[vk::binding(18, 0)]] RWStructuredBuffer<float4> film_out;  // 1 per pixel
+struct FilmPush { uint width; uint height; float time; float frame; };
+[[vk::push_constant]] ConstantBuffer<FilmPush> film_pc;
+
+/// Film programs: linear colour of another pixel (clamped to the image), for blurs,
+/// glows and distortion. Only meaningful inside a film program.
+float3 film_color(int2 p) {
+    p = clamp(p, int2(0, 0), int2(film_pc.width, film_pc.height) - 1);
+    return film_in[(uint(p.y) * film_pc.width + uint(p.x)) * 3].rgb;
+}
+
+//@PXL_USER_CODE
+
 // ---------------------------------------------------------------- main
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void main(uint3 id: SV_DispatchThreadID) {
     F = frames[0];
+    pxl_load_params();
     if (id.x >= F.dims.x || id.y >= F.dims.y) return;
     uint idx = id.y * F.dims.x + id.x;
     uint rng = hash(idx ^ hash(pc.sample_index * 0x9e3779b9u + F.misc.x * 0x85ebca6bu));
 
-    float2 uv = (float2(id.xy) + float2(rnd(rng), rnd(rng))) / float2(F.dims.xy) * 2 - 1;
+    float2 jitter = float2(rnd(rng), rnd(rng));
+    float2 uv = (float2(id.xy) + jitter) / float2(F.dims.xy) * 2 - 1;
     float3 o = F.cam_pos.xyz;
     float3 d = normalize(F.cam_fwd.xyz + uv.x * F.cam_right.xyz - uv.y * F.cam_up.xyz);
     if (F.lens.x > 0) {                               // thin lens: sample the aperture, aim at the focal plane
@@ -434,12 +512,41 @@ void main(uint3 id: SV_DispatchThreadID) {
     }
     float4 aov0 = float4(0), aov1 = float4(0);
     uint object_id = NONE;
-
     float3 radiance = 0, thr = 1;
+
+#ifdef PXL_HOOK_CAMERA
+    {
+        CameraIn ci;
+        ci.ndc = float2(uv.x, -uv.y);
+        ci.pixel = float2(id.xy) + jitter;
+        ci.resolution = float2(F.dims.xy);
+        ci.position = F.cam_pos.xyz;
+        ci.forward = F.cam_fwd.xyz;
+        ci.right = normalize(F.cam_right.xyz);
+        ci.up = normalize(F.cam_up.xyz);
+        ci.tan_half_fov = length(F.cam_up.xyz);
+        ci.aspect = length(F.cam_right.xyz) / max(length(F.cam_up.xyz), 1e-8);
+        if (!pxl_hook_camera(ci, o, d)) thr = 0;
+        d = normalize(d);
+    }
+#endif
+
     float prev_pdf = 0;       // BSDF pdf of the ray that reached this vertex (0 = camera ray)
     float clamp_v = F.envq.y;
-    for (uint bounce = 0; bounce <= F.dims.w; bounce++) {
+    for (uint bounce = 0; bounce <= F.dims.w && any(thr > 0); bounce++) {
+#ifdef PXL_HOOK_PROPAGATE
+        Ray pr; pr.origin = o; pr.dir = d;
+        float3 emitted = 0;
+        Hit h = pxl_hook_propagate(pr, emitted, thr, rng);
+        d = normalize(pr.dir);
+        radiance += bounce > 1 ? min(emitted, float3(clamp_v)) : emitted;
+        if (all(thr <= 0)) {
+            if (bounce == 0) aov0 = float4(0, 0, 0, h.hit ? 1 : 0);
+            break;
+        }
+#else
         Hit h = trace(o, d);
+#endif
         if (!h.hit) {
             float3 Le = env_radiance(d);
             if (bounce == 0) aov0 = float4(saturate(Le), 0);
@@ -450,6 +557,14 @@ void main(uint3 id: SV_DispatchThreadID) {
         }
         Surface s = make_surface(h, d);
         float3 v = -d;
+        uint prog = material_program(h);
+        if (prog != 0) {
+            pxl_run_material_program(prog, s, surface_input(h, d, s));
+            s.rough = clamp(s.rough, 0.02, 1.0);
+            s.metal = saturate(s.metal);
+            s.n = normalize(s.n);
+            if (dot(s.n, s.ng) < 0) s.n = normalize(s.n - s.ng * (dot(s.n, s.ng) - 1e-3));
+        }
         if (bounce == 0) {
             aov0 = float4(s.base, 1);
             aov1 = float4(s.n, dot(s.p - F.cam_pos.xyz, F.cam_fwd.xyz));
@@ -489,3 +604,27 @@ void main(uint3 id: SV_DispatchThreadID) {
     aux[idx * 3 + 1] = (first ? float4(0) : aux[idx * 3 + 1]) + aov1;
     if (first) aux[idx * 3 + 2] = float4(asfloat(object_id), 0, 0, 0);
 }
+
+// ---------------------------------------------------------------- film program pass
+#ifdef PXL_HOOK_FILM
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void film_main(uint3 id: SV_DispatchThreadID) {
+    F.lens = float4(0, 0, film_pc.time, film_pc.frame);
+    F.dims = uint4(film_pc.width, film_pc.height, 0, 0);
+    pxl_load_params();
+    if (id.x >= film_pc.width || id.y >= film_pc.height) return;
+    uint i = id.y * film_pc.width + id.x;
+    FilmIn f;
+    f.color = film_in[i * 3].rgb;
+    f.alpha = film_in[i * 3].a;
+    f.normal = film_in[i * 3 + 1].xyz;
+    f.depth = film_in[i * 3 + 1].w;
+    f.albedo = film_in[i * 3 + 2].rgb;
+    f.pixel = id.xy;
+    f.resolution = uint2(film_pc.width, film_pc.height);
+    float3 c = pxl_hook_film(f);
+    if (any(isnan(c)) || any(isinf(c))) c = 0;
+    film_out[i] = float4(c, f.alpha);
+}
+#endif

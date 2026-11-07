@@ -2,6 +2,9 @@
 
 pub mod film;
 mod library;
+mod program;
+
+pub use program::ProgramSet;
 
 use anyhow::{bail, Context as _, Result};
 use glam::{Mat3, Vec3};
@@ -11,7 +14,6 @@ use pxl_scene::{LightShape, Node, Scene};
 use std::path::Path;
 use std::time::Instant;
 
-const PATHTRACE_SRC: &str = include_str!("../../../shaders/pathtrace.slang");
 const NONE: u32 = u32::MAX;
 
 /// Quality presets. `--set samples=N` / `bounces=N` (or scene render.samples) override.
@@ -84,6 +86,8 @@ pub struct Renderer {
     pub ctx: Context,
     pipe: ComputePipeline,
     denoiser: Option<std::result::Result<pxl_denoise::Denoiser, String>>,
+    programs: ProgramSet,
+    film_pipe: Option<ComputePipeline>,
 }
 
 /// Static (whole-render) GPU data.
@@ -99,13 +103,26 @@ struct Shared {
 }
 
 impl Renderer {
-    pub fn new() -> Result<Renderer> {
+    /// Compile the path tracer with `programs` spliced in (use `ProgramSet::none()` for none).
+    pub fn new(programs: ProgramSet) -> Result<Renderer> {
         let mut ctx = Context::new()?;
-        let spirv = pxl_gpu::slang::compile_compute(PATHTRACE_SRC, "main").context("compiling path tracer")?;
-        let mut bindings = vec![Binding::Accel];
-        bindings.extend(std::iter::repeat(Binding::Storage).take(15));
+        let what = if programs.camera || programs.propagate || programs.film || !programs.material_ids.is_empty() {
+            "compiling path tracer with scene programs"
+        } else {
+            "compiling path tracer"
+        };
+        let spirv = pxl_gpu::slang::compile_compute(&programs.source, "main").context(what)?;
+        let mut bindings = vec![(0, Binding::Accel)];
+        bindings.extend((1..=15).map(|i| (i, Binding::Storage)));
+        bindings.push((17, Binding::Storage));
         let pipe = ctx.create_compute(&spirv, "main", &bindings, 16)?;
-        Ok(Renderer { ctx, pipe, denoiser: None })
+        let film_pipe = if programs.film {
+            let spirv = pxl_gpu::slang::compile_compute(&programs.source, "film_main").context("compiling film program")?;
+            Some(ctx.create_compute(&spirv, "main" /* slangc names the compiled entry point main */, &[(16, Binding::Storage), (17, Binding::Storage), (18, Binding::Storage)], 16)?)
+        } else {
+            None
+        };
+        Ok(Renderer { ctx, pipe, denoiser: None, programs, film_pipe })
     }
 
     /// Name of the denoiser device, or why it's unavailable.
@@ -131,7 +148,7 @@ impl Renderer {
         opts: &RenderOptions,
         mut sink: impl FnMut(usize, Image, &FrameStats) -> Result<()>,
     ) -> Result<Vec<String>> {
-        let mut lib = Library::new(base_dir);
+        let mut lib = Library::new(base_dir, self.programs.material_ids.clone());
         let mut prepared: Vec<Vec<(Scene, Vec<Inst>)>> = Vec::with_capacity(frames.len());
         for subframes in frames {
             let mut list = Vec::with_capacity(subframes.len());
@@ -312,6 +329,34 @@ impl Renderer {
                 }
             }
         }
+        if let Some(film) = self.film_pipe {
+            // Film program: one GPU pass over the finished (denoised) frame.
+            let scene = &subframes[subframes.len() / 2].0;
+            let mut input: Vec<[f32; 4]> = Vec::with_capacity(np * 3);
+            for i in 0..np {
+                let (c, n, a) = (&img.rgb[i * 3..i * 3 + 3], &img.normal[i * 3..i * 3 + 3], &img.albedo[i * 3..i * 3 + 3]);
+                input.push([c[0], c[1], c[2], img.alpha[i]]);
+                input.push([n[0], n[1], n[2], img.depth[i]]);
+                input.push([a[0], a[1], a[2], 0.0]);
+            }
+            let ctx = &mut self.ctx;
+            let fin = ctx.create_buffer_init(bytes(&input), storage, "film in")?;
+            let par = ctx.create_buffer_init(bytes(&self.programs.param_data(scene)), storage, "film params")?;
+            let fout = ctx.create_buffer(pixels * 16, storage, MemoryLocation::GpuToCpu, "film out")?;
+            ctx.bind(&film, &[(16, Resource::Buffer(fin)), (17, Resource::Buffer(par)), (18, Resource::Buffer(fout))]);
+            let time = (scene.frame / scene.render.fps as f64) as f32;
+            let push = [w.to_le_bytes(), h.to_le_bytes(), time.to_le_bytes(), (scene.frame as f32).to_le_bytes()].concat();
+            let c = &*ctx;
+            c.submit(|cmd| c.dispatch(cmd, &film, &push, [w.div_ceil(8), h.div_ceil(8), 1]))?;
+            let raw = c.read(&fout)?;
+            let out: &[f32] = unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) };
+            for (i, px) in out.chunks_exact(4).take(np).enumerate() {
+                img.rgb[i * 3..i * 3 + 3].copy_from_slice(&px[..3]);
+            }
+            for b in [fin, par, fout] {
+                ctx.destroy_buffer(b);
+            }
+        }
         stats.denoise_ms = t1.elapsed().as_secs_f64() * 1e3;
         stats.subframes = subframes.len();
         Ok((img, stats))
@@ -451,7 +496,11 @@ impl Renderer {
         stats.lights = lights.len();
 
         // ---- light category probabilities
-        let has = [!lights.is_empty(), emissive_count > 0, sh.env.is_some()];
+        // With a propagation program rays bend, so straight-line light sampling of glowing
+        // surfaces and the environment would be wrong: those are then found by path tracing
+        // alone (MIS weights fall back to 1). Analytic lights keep straight shadow rays.
+        let curved = self.programs.propagate;
+        let has = [!lights.is_empty(), emissive_count > 0 && !curved, sh.env.is_some() && !curved];
         let n = has.iter().filter(|h| **h).count().max(1) as f32;
         let p = has.map(|h| if h { 1.0 / n } else { 0.0 });
 
@@ -482,7 +531,8 @@ impl Renderer {
         frame.extend_from_slice(bytes(&[scene.world.rotation / 360.0, env_total, p[0], p[1]]));
         frame.extend_from_slice(bytes(&[p[2], opts.clamp, 0.0, 0.0]));
         let (aperture, focus) = cam.lens();
-        frame.extend_from_slice(bytes(&[aperture, focus, 0.0, 0.0]));
+        let time = (scene.frame / scene.render.fps as f64) as f32;
+        frame.extend_from_slice(bytes(&[aperture, focus, time, scene.frame as f32]));
 
         // ---- upload per-frame data
         let ctx = &mut self.ctx;
@@ -496,29 +546,30 @@ impl Renderer {
         let em_buf = ctx.create_buffer_init(bytes(&emissive), storage, "emissive")?;
         let cdf_buf = ctx.create_buffer_init(bytes(&cdf), storage, "emissive cdf")?;
         let frame_buf = ctx.create_buffer_init(&frame, storage, "frame")?;
+        let par_buf = ctx.create_buffer_init(bytes(&self.programs.param_data(scene)), storage, "params")?;
         let tlas = ctx.build_tlas(&tlas_inst)?;
         let pixels = w as u64 * h as u64;
-        ctx.bind(
-            &self.pipe,
-            &[
-                Resource::Accel(tlas.handle),
-                Resource::Buffer(sh.vbuf),
-                Resource::Buffer(sh.ibuf),
-                Resource::Buffer(inst_buf),
-                Resource::Buffer(mat_buf),
-                Resource::Buffer(light_buf),
-                Resource::Buffer(accum),
-                Resource::Buffer(sh.tex_info),
-                Resource::Buffer(sh.texels),
-                Resource::Buffer(em_buf),
-                Resource::Buffer(cdf_buf),
-                Resource::Buffer(sh.env_pix),
-                Resource::Buffer(sh.env_marg),
-                Resource::Buffer(sh.env_cond),
-                Resource::Buffer(frame_buf),
-                Resource::Buffer(aux),
-            ],
-        );
+        let resources = [
+            Resource::Accel(tlas.handle),
+            Resource::Buffer(sh.vbuf),
+            Resource::Buffer(sh.ibuf),
+            Resource::Buffer(inst_buf),
+            Resource::Buffer(mat_buf),
+            Resource::Buffer(light_buf),
+            Resource::Buffer(accum),
+            Resource::Buffer(sh.tex_info),
+            Resource::Buffer(sh.texels),
+            Resource::Buffer(em_buf),
+            Resource::Buffer(cdf_buf),
+            Resource::Buffer(sh.env_pix),
+            Resource::Buffer(sh.env_marg),
+            Resource::Buffer(sh.env_cond),
+            Resource::Buffer(frame_buf),
+            Resource::Buffer(aux),
+        ];
+        let mut bound: Vec<(u32, Resource)> = resources.into_iter().enumerate().map(|(i, r)| (i as u32, r)).collect();
+        bound.push((17, Resource::Buffer(par_buf)));
+        ctx.bind(&self.pipe, &bound);
         stats.build_ms += t0.elapsed().as_secs_f64() * 1e3;
 
         // ---- progressive samples, batched to stay well under the OS GPU watchdog
@@ -539,7 +590,7 @@ impl Renderer {
             s = end;
         }
         stats.render_ms += t1.elapsed().as_secs_f64() * 1e3;
-        for b in [inst_buf, mat_buf, light_buf, em_buf, cdf_buf, frame_buf] {
+        for b in [inst_buf, mat_buf, light_buf, em_buf, cdf_buf, frame_buf, par_buf] {
             ctx.destroy_buffer(b);
         }
         ctx.destroy_accel(tlas);

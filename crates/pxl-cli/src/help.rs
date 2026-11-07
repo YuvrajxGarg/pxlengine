@@ -4,6 +4,7 @@ const TOPICS: &[(&str, &str)] = &[
     ("index", include_str!("../../../docs/help/index.md")),
     ("scene", include_str!("../../../docs/help/scene.md")),
     ("render", include_str!("../../../docs/help/render.md")),
+    ("programs", include_str!("../../../docs/help/programs.md")),
 ];
 
 pub fn print(topic: Option<&str>) -> Result<()> {

@@ -22,6 +22,8 @@ material inputs (OpenPBR names, defaults shown):
 - `emission_color` [1,1,1], `emission_luminance` 0 (glow; try 5..50)  ·  `emission_color_texture`
 - `normal_texture` (OpenGL/+Y, e.g. Poly Haven `nor_gl`), `normal_scale` 1
 - `uv_scale` [1,1]   texture tiling (e.g. [8,8] on a 10 m grid)
+A material may also name a program: `{"program":"marble","inputs":{...}}` (see
+`pxl help programs`); it runs after inputs and textures and can change any of them.
 Glowing meshes are real light sources (they light and shadow the scene).
 
 ## asset (glTF 2.0)

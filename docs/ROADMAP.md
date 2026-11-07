@@ -45,8 +45,16 @@ There is no editor.
       raster pipeline would add complexity without a speed win on RT hardware.
       Known gaps: motion blur rebuilds the scene per subframe (~200 ms/frame at 16 instants);
       object-id comes from the first sample (aliased edges); denoiser can soften fine grain.
-- [ ] **4. Program hooks** – scene-supplied Slang for camera rays, material response, light
-      propagation (e.g. Schwarzschild black hole), film response. Slang interfaces + module linking.
+- [x] **4. Program hooks** (done 2026-11-07) – scene `programs` block with Slang `source`/`code`
+      and typed, animatable `params` (`P.<name>`). Hooks: material (per mesh), camera rays,
+      light propagation (curved rays marched with `trace_segment`), film (per-pixel pass after
+      denoising, can read neighbours). Code is spliced into the core shader under `#line` so
+      compiler errors point at the user's file. Examples: Schwarzschild black hole with a
+      Keplerian, Doppler-beamed accretion disk and lensed starfield; marble / lava / tiles
+      materials; fisheye lens; aberration + vignette + grain film look.
+      Known gaps: with a propagation program, emissive/HDRI light sampling is off (BSDF-only,
+      noisier) and shadow rays stay straight; emission added by material programs isn't
+      importance-sampled; programs can't add their own GPU buffers yet (phase 5).
 - [ ] **5. Simulation programs** – Slang compute stages owned by the scene: particles / agents
       (million-bird flock), GPU instancing into the TLAS, per-frame refit.
 - [ ] **6. VFX + libraries** – plate footage, tracked cameras, proxy geometry & shadow catchers,

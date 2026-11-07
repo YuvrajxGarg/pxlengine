@@ -12,3 +12,4 @@ pxl-scene = { path = "../pxl-scene" }
 pxl-gpu = { path = "../pxl-gpu" }
 pxl-assets = { path = "../pxl-assets" }
 pxl-denoise = { path = "../pxl-denoise" }
+serde_json.workspace = true

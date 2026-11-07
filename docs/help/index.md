@@ -8,6 +8,7 @@ Write a scene as JSON, render it, look at the image, revise. No editor.
     pxl render shot.json --out plate.exr --passes all            # compositing: EXR + mattes
     pxl help scene    # every node type and field
     pxl help render   # profiles, --set overrides, output
+    pxl help programs # your own Slang: materials, lenses, bent light, film looks
     pxl info          # which GPU is used
 
 ## First scene

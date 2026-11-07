@@ -38,6 +38,7 @@ pub struct Library {
     assets: HashMap<PathBuf, Vec<(usize, GpuMaterial, Mat4)>>,
     pub env: Option<(PathBuf, HdrImage)>,
     pub warnings: Vec<String>,
+    material_programs: std::collections::BTreeMap<String, u32>,
 }
 
 pub struct MatDesc {
@@ -55,6 +56,8 @@ pub struct MatDesc {
     pub normal_scale: f32,
     pub alpha_cutoff: f32,
     pub uv_scale: [f32; 2],
+    /// Scene material program id (0 = none).
+    pub program: u32,
 }
 
 pub fn encode_material(m: &MatDesc) -> GpuMaterial {
@@ -65,7 +68,7 @@ pub fn encode_material(m: &MatDesc) -> GpuMaterial {
         i(m.tex[0]), i(m.tex[1]), i(m.tex[2]), i(m.tex[3]),
         i(m.normal_tex), i(m.rough_channel), i(m.metal_channel), i(m.alpha_mask as i32),
         m.normal_scale, m.alpha_cutoff, m.uv_scale[0], m.uv_scale[1],
-        m.base_alpha, 0.0, 0.0, 0.0,
+        m.base_alpha, f32::from_bits(m.program), 0.0, 0.0,
     ]
 }
 
@@ -110,7 +113,7 @@ pub fn triangle_texture_luminance(img: &RgbaImage, uv: [[f32; 2]; 3], scale: [f3
 }
 
 impl Library {
-    pub fn new(base_dir: &Path) -> Library {
+    pub fn new(base_dir: &Path, material_programs: std::collections::BTreeMap<String, u32>) -> Library {
         Library {
             base_dir: base_dir.to_path_buf(),
             meshes: Vec::new(),
@@ -120,6 +123,7 @@ impl Library {
             assets: HashMap::new(),
             env: None,
             warnings: Vec::new(),
+            material_programs,
         }
     }
 
@@ -150,7 +154,14 @@ impl Library {
         Ok(i)
     }
 
-    fn material_from_inputs(&mut self, m: &MaterialInputs) -> Result<GpuMaterial> {
+    fn material_from_inputs(&mut self, m: &MaterialInputs, program: Option<&str>) -> Result<GpuMaterial> {
+        let program = match program {
+            Some(name) => *self
+                .material_programs
+                .get(name)
+                .with_context(|| format!("material program '{name}' is not known to the compiled programs"))?,
+            None => 0,
+        };
         let mut tex = |f: &Option<String>| -> Result<i32> {
             match f {
                 Some(f) => self.texture_file(f),
@@ -179,6 +190,7 @@ impl Library {
             normal_scale: m.normal_scale,
             alpha_cutoff: 0.5,
             uv_scale: m.uv_scale,
+            program,
         }))
     }
 
@@ -223,6 +235,7 @@ impl Library {
                 normal_scale: m.normal_scale,
                 alpha_cutoff: m.alpha_cutoff,
                 uv_scale: [1.0, 1.0],
+                program: 0,
             };
             let opaque = !m.alpha_mask;
             let mesh = self.add_mesh(format!("{}#p{pi}", path.display()), prim.mesh, opaque);
@@ -245,8 +258,8 @@ impl Library {
                         Some(&i) => i,
                         None => self.add_mesh(key, geometry::build(&m.geometry), true),
                     };
-                    let inputs = m.materials.first().map(|m| m.inputs.clone()).unwrap_or_default();
-                    let material = self.material_from_inputs(&inputs).with_context(|| {
+                    let first = m.materials.first().cloned().unwrap_or_default();
+                    let material = self.material_from_inputs(&first.inputs, first.program.as_deref()).with_context(|| {
                         format!("material of mesh '{}'", m.name.as_deref().unwrap_or("unnamed"))
                     })?;
                     out.push(Inst { object, mesh, material, xform: m.transform() });

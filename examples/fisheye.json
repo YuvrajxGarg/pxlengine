@@ -1,0 +1,16 @@
+{"version":1,
+"programs":{
+  "source":"programs/showcase.slang",
+  "camera":"fisheye",
+  "params":{"marble_scale":2.5,"lava_glow":8,"tile_size":1.5,
+            "aberration":0,"vignette":0,"grain":0,"fisheye_fov":180}
+},
+"nodes":[
+  {"type":"mesh","name":"floor","geometry":{"std":"grid","size":[30,30]},"materials":[{"program":"tiles"}]},
+  {"type":"mesh","name":"marble","translation":[-1.3,0.8,0],"geometry":{"std":"sphere","radius":0.8},"materials":[{"program":"marble"}]},
+  {"type":"mesh","name":"lava","translation":[1.3,0.75,0.2],"rotation":[20,0,10],
+   "geometry":{"std":"torus","radius":0.55,"tube":0.3},"materials":[{"program":"lava"}]},
+  {"type":"camera","translation":[0,1.4,2.6],"target":[0,0.6,0],"fov":60}
+],
+"world":{"hdri":"../assets/studio_small_09_2k.hdr","strength":0.4},
+"render":{"resolution":[960,540]}}

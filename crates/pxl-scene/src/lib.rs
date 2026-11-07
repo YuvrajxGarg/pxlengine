@@ -26,9 +26,91 @@ pub struct Scene {
     pub render: RenderSettings,
     #[serde(default)]
     pub animation: Option<Animation>,
+    #[serde(default)]
+    pub programs: Option<Programs>,
     /// The JSON this scene was parsed from; animation tracks are applied to it per frame.
     #[serde(skip)]
     raw: Value,
+    /// Frame this scene was evaluated at (0 for a static scene).
+    #[serde(skip)]
+    pub frame: f64,
+}
+
+/// Scene-supplied Slang code hooked into the renderer. See `pxl help programs`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Programs {
+    /// Slang file, relative to the scene file.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Inline Slang code (appended after `source`).
+    #[serde(default)]
+    pub code: Option<String>,
+    /// `bool f(CameraIn c, inout float3 origin, inout float3 dir)`
+    #[serde(default)]
+    pub camera: Option<String>,
+    /// `Hit f(inout Ray r, inout float3 radiance, inout float3 throughput, inout uint rng)`
+    #[serde(default)]
+    pub propagate: Option<String>,
+    /// `float3 f(FilmIn i)`
+    #[serde(default)]
+    pub film: Option<String>,
+    /// Values exposed to programs as `P.<name>`: number -> float, [a,b] -> float2, ... float4.
+    /// Animatable with tracks on path `programs/params/<name>`.
+    #[serde(default)]
+    pub params: std::collections::BTreeMap<String, Value>,
+}
+
+impl Programs {
+    /// Number of float components of a param value (1..4), or an error.
+    pub fn param_width(name: &str, v: &Value) -> Result<usize> {
+        let n = match v {
+            Value::Number(_) => 1,
+            Value::Array(a) if (2..=4).contains(&a.len()) && a.iter().all(Value::is_number) => a.len(),
+            _ => bail!("programs.params.{name} must be a number or an array of 2-4 numbers"),
+        };
+        Ok(n)
+    }
+
+    pub fn param_values(v: &Value) -> [f32; 4] {
+        let mut out = [0f32; 4];
+        match v {
+            Value::Number(n) => out[0] = n.as_f64().unwrap_or(0.0) as f32,
+            Value::Array(a) => {
+                for (i, x) in a.iter().take(4).enumerate() {
+                    out[i] = x.as_f64().unwrap_or(0.0) as f32;
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    fn validate(&self, nodes: &[Node]) -> Result<()> {
+        for (name, v) in &self.params {
+            if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || name.starts_with(|c: char| c.is_ascii_digit()) {
+                bail!("programs.params: '{name}' must be a valid identifier (letters, digits, _)");
+            }
+            Programs::param_width(name, v)?;
+        }
+        for (field, f) in [("camera", &self.camera), ("propagate", &self.propagate), ("film", &self.film)] {
+            if let Some(f) = f {
+                if !is_ident(f) {
+                    bail!("programs.{field}: '{f}' must be the name of a Slang function");
+                }
+            }
+        }
+        let uses_materials = nodes.iter().any(|n| matches!(n, Node::Mesh(m) if m.materials.iter().any(|m| m.program.is_some())));
+        let hooks = self.camera.is_some() || self.propagate.is_some() || self.film.is_some() || uses_materials;
+        if hooks && self.source.is_none() && self.code.is_none() {
+            bail!("programs: hooks are named but there is no `source` file or inline `code`");
+        }
+        Ok(())
+    }
+}
+
+fn is_ident(s: &str) -> bool {
+    !s.is_empty() && !s.starts_with(|c: char| c.is_ascii_digit()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -132,6 +214,9 @@ pub enum Geometry {
 pub struct Material {
     #[serde(default)]
     pub inputs: MaterialInputs,
+    /// Name of a material function in `programs` that edits the surface after inputs/textures.
+    #[serde(default)]
+    pub program: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -361,6 +446,23 @@ impl Scene {
         if !(self.render.fps > 0.0) {
             bail!("render.fps must be > 0");
         }
+        for n in &self.nodes {
+            if let Node::Mesh(m) = n {
+                for mat in &m.materials {
+                    if let Some(p) = &mat.program {
+                        if !is_ident(p) {
+                            bail!("material program '{p}' must be the name of a Slang function");
+                        }
+                        if self.programs.is_none() {
+                            bail!("a material uses program '{p}' but the scene has no `programs` block");
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(p) = &self.programs {
+            p.validate(&self.nodes)?;
+        }
         if let Some(m) = self.render.motion_blur {
             if !(0.0..=1.0).contains(&m) {
                 bail!("render.motion_blur is the shutter fraction of a frame, 0..1 (0.5 = 180°), got {m}");
@@ -376,7 +478,11 @@ impl Scene {
 
     /// The scene with all animation tracks evaluated at `frame`.
     pub fn at_frame(&self, frame: f64) -> Result<Scene> {
-        let Some(anim) = &self.animation else { return Ok(self.clone()) };
+        let Some(anim) = &self.animation else {
+            let mut s = self.clone();
+            s.frame = frame;
+            return Ok(s);
+        };
         let mut raw = self.raw.clone();
         for (i, track) in anim.tracks.iter().enumerate() {
             let v = track.eval(frame).with_context(|| format!("animation.tracks[{i}]"))?;
@@ -385,7 +491,16 @@ impl Scene {
         let mut s: Scene = serde_json::from_value(raw.clone())
             .map_err(|e| anyhow::anyhow!("scene invalid at frame {frame} after animation: {e}"))?;
         s.raw = raw;
+        s.frame = frame;
         s.validate()?;
+        if let (Some(a), Some(b)) = (&self.programs, &s.programs) {
+            for (k, v) in &a.params {
+                let same = b.params.get(k).map(|w| Programs::param_width(k, w).ok() == Programs::param_width(k, v).ok());
+                if same != Some(true) {
+                    bail!("programs.params.{k}: animation may change values but not remove a param or its size");
+                }
+            }
+        }
         Ok(s)
     }
 

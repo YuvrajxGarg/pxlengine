@@ -38,15 +38,15 @@ impl ComputePipeline {
 }
 
 impl Context {
-    pub fn create_compute(&mut self, spirv: &[u8], entry: &str, bindings: &[Binding], push_size: u32) -> Result<ComputePipeline> {
+    /// `bindings` are (binding number, kind) in descriptor set 0.
+    pub fn create_compute(&mut self, spirv: &[u8], entry: &str, bindings: &[(u32, Binding)], push_size: u32) -> Result<ComputePipeline> {
         let d = &self.device;
         let words = ash::util::read_spv(&mut std::io::Cursor::new(spirv)).context("invalid SPIR-V")?;
         let layout_bindings: Vec<_> = bindings
             .iter()
-            .enumerate()
             .map(|(i, b)| {
                 vk::DescriptorSetLayoutBinding::default()
-                    .binding(i as u32)
+                    .binding(*i)
                     .descriptor_type(match b {
                         Binding::Accel => vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
                         Binding::Storage => vk::DescriptorType::STORAGE_BUFFER,
@@ -103,16 +103,16 @@ impl Context {
         }
     }
 
-    /// Bind resources to bindings 0..n of the pipeline's set.
-    pub fn bind(&self, p: &ComputePipeline, resources: &[Resource]) {
-        for (i, r) in resources.iter().enumerate() {
-            match *r {
+    /// Bind (binding number, resource) pairs in the pipeline's set.
+    pub fn bind(&self, p: &ComputePipeline, resources: &[(u32, Resource)]) {
+        for &(i, r) in resources {
+            match r {
                 Resource::Accel(a) => {
                     let accels = [a];
                     let mut w_as = vk::WriteDescriptorSetAccelerationStructureKHR::default().acceleration_structures(&accels);
                     let w = vk::WriteDescriptorSet::default()
                         .dst_set(p.set)
-                        .dst_binding(i as u32)
+                        .dst_binding(i)
                         .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
                         .descriptor_count(1)
                         .push_next(&mut w_as);
@@ -122,7 +122,7 @@ impl Context {
                     let info = [vk::DescriptorBufferInfo::default().buffer(b.handle).range(vk::WHOLE_SIZE)];
                     let w = vk::WriteDescriptorSet::default()
                         .dst_set(p.set)
-                        .dst_binding(i as u32)
+                        .dst_binding(i)
                         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                         .buffer_info(&info);
                     unsafe { self.device.update_descriptor_sets(&[w], &[]) };
